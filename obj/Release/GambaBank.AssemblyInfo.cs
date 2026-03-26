@@ -13,11 +13,11 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyCompanyAttribute("GambaBank")]
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Release")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1be2cb91930d314ac1937fe4559e2ac613de55c4")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+b534246372f5429cc0076a0822b8bc762219cc04")]
 [assembly: System.Reflection.AssemblyProductAttribute("GambaBank")]
 [assembly: System.Reflection.AssemblyTitleAttribute("GambaBank")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "https://github.com/goatcorp/SamplePlugin.git")]
+[assembly: System.Reflection.AssemblyMetadataAttribute("RepositoryUrl", "https://github.com/seventity7/GambaBank.git")]
 [assembly: System.Runtime.Versioning.TargetPlatformAttribute("Windows7.0")]
 [assembly: System.Runtime.Versioning.SupportedOSPlatformAttribute("Windows7.0")]
 

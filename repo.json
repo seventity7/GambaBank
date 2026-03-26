@@ -1,23 +1,23 @@
 [
   {
     "Author": "Bryer",
-    "Name": "CreateXIV",
-    "Punchline": "Easily keep track of your Start/Final bank and results. For gamba Dealers by a gamba Dealer.",
+    "Name": "GambaBank",
+    "Punchline": "Easily keep track of your Start/Final bank and results.",
     "Description": "Simple and fast way to know your night gamba results.",
-    "InternalName": "CreateXIV",
+    "InternalName": "GambaBank",
     "AssemblyVersion": "1.0.0",
     "RepoUrl": "https://github.com/seventity7/GambaBank",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 14,
     "TestingDalamudApiLevel": 14,
-    "IsHide": "False",
-    "IsTestingExclusive": "False",
+    "IsHide": false,
+    "IsTestingExclusive": false,
     "DownloadCount": 0,
-    "LastUpdate": 0,
+    "LastUpdate": 1700000000,
     "LoadPriority": 69420,
     "LoadRequiredState": 2,
     "LoadSync": true,
-    "DownloadLinkInstall": "https://github.com/seventity7/CreateXIV/releases/latest/download/GambaBank.zip",
-    "IconUrl": "https://raw.githubusercontent.com/seventity7/CreateXIV/main/bank.png"
+    "DownloadLinkInstall": "https://github.com/seventity7/GambaBank/releases/latest/download/GambaBank.zip",
+    "IconUrl": "https://raw.githubusercontent.com/seventity7/GambaBank/main/bank.png"
   }
 ]
