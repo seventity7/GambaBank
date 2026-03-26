@@ -15,7 +15,6 @@ C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\SamplePlugin\Samp
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\SamplePlugin\SamplePlugin\obj\Release\GambaBank.sourcelink.json
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\SamplePlugin\SamplePlugin\obj\Release\GambaBank.csproj.Up2Date
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\SamplePlugin\SamplePlugin\obj\Release\GambaBank.dll
-C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Release\Images\create.png
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Release\GambaBank.deps.json
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Release\GambaBank.dll
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Release\ImGui.NET.dll
@@ -32,3 +31,4 @@ C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBa
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Release\GambaBank.sourcelink.json
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Release\GambaBank.csproj.Up2Date
 C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Release\GambaBank.dll
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Release\Images\bank.png

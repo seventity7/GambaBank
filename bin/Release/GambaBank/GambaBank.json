@@ -2,7 +2,7 @@
   "Author": "Bryer",
   "Name": "Gamba Dealer",
   "InternalName": "GambaBank",
-  "AssemblyVersion": "1.0.0.0",
+  "AssemblyVersion": "1.0.1.0",
   "Description": "Simple and fast way to know your night gamba results.",
   "ApplicableVersion": "any",
   "Tags": [
