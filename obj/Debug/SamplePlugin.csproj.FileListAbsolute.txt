@@ -1,0 +1,10 @@
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Debug\goat.png
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Debug\GambaBank.deps.json
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\bin\Debug\GambaBank.dll
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.csproj.AssemblyReference.cache
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.GeneratedMSBuildEditorConfig.editorconfig
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.AssemblyInfoInputs.cache
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.AssemblyInfo.cs
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.csproj.CoreCompileInputs.cache
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.sourcelink.json
+C:\Users\Bryer\AppData\Roaming\XIVLauncher\devPlugins\BankCalc\GambaBank\GambaBank\obj\Debug\GambaBank.dll
