@@ -6,11 +6,14 @@
 - Results now update instantly while typing
 - Removed need for confirm button
 
+
 ➕ Tips System
 - Added Tips field fully integrated into calculation
 
+
 **Math Formula:**
 `{FinalBank} - {StartingBank} - {Tips} = {Results}`
+
 
 📊 History System
 _Stores full session data:_
@@ -21,6 +24,7 @@ _Stores full session data:_
 - Tips
 - Results
 
+
 🔽 Sorting System
 _Sort history by:_
 - Most recent
@@ -28,11 +32,14 @@ _Sort history by:_
 - Highest results
 - Highest tips
 
--↩️ Undo System
+
+↩️ Undo System
 _Undo last saved entry instantly_
+
 
 📋 Save to History
 _Manual session saving button added_
+
 
 ❓ Help / Formula Tooltip
  - New help button (?)
@@ -40,12 +47,15 @@ _Manual session saving button added_
  - Click → persistent tooltip
  - Click again → close
 
+
 📎 Copy Feedback
  - _Copy button now shows:_
  - `✓ Copied`
 
+
 🎛️ New Command
  - `/banksettinngs` → opens config window
+
 
 ## **🛠️ Fixed**
 
@@ -67,6 +77,7 @@ _Manual session saving button added_
 - 🟢 Results → positive
 - 🔴 Results → negative
 
+
 ## **📝 Improved**
 
 - ⚡ Faster input handling
@@ -80,6 +91,7 @@ _Manual session saving button added_
 - 🧷 Better spacing between sections
 - 📐 More consistent alignment
 
+
 ## **🧾 Notes**
 ### _Formula formatting:_
 
@@ -88,6 +100,7 @@ _Manual session saving button added_
 - 📂 History is saved per profile
 - 📎 Copy can include timestamp (optional)
 
+
 ## **📌 Summary**
 ### _This update focuses on:_
 
@@ -95,6 +108,7 @@ _Manual session saving button added_
 - 🎨 UI polish
 - 📊 History & data control
 - 🧠 Better usability and QOL
+
 
 **`End of changelog`**
 
