@@ -1,4 +1,4 @@
-`Changelog 1.0.2 - 03/29/2026`
+**`Changelog 1.0.2 - 03/29/2026`**
 
 ## **✨ Added:**
 
@@ -96,7 +96,8 @@ _Manual session saving button added_
 - 📊 History & data control
 - 🧠 Better usability and QOL
 
-`**End of changelog**`
+**`End of changelog`**
+
 
 # **💰 Gamba Bank**
 
