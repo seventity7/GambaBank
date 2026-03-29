@@ -1,6 +1,6 @@
 `Changelog 1.0.2 - 03/29/2026`
 
-##✨ Added:
+## ✨ Added:
 
 - Real-time Calculation
 - Results now update instantly while typing
@@ -67,7 +67,7 @@ _Copy button now shows:_
 🟢 Results → positive
 🔴 Results → negative
 
-##📝 Improved
+## 📝 Improved
 
 ⚡ Faster input handling
 🧠 Cleaner calculation logic
@@ -80,7 +80,7 @@ _Copy button now shows:_
 🧷 Better spacing between sections
 📐 More consistent alignment
 
-##🧾 Notes
+## 🧾 Notes
 
 Formula formatting:
 ✔ Positive results → +
@@ -88,7 +88,7 @@ Formula formatting:
 📂 History is saved per profile
 📎 Copy can include timestamp (optional)
 
-##📌 Summary
+## 📌 Summary
 _This update focuses on:_
 
 ⚡ Speed (real-time updates)
@@ -136,7 +136,7 @@ Final Bank: `5.000.000`
 Tips: `2.000.000`
 Result: `+ 3.000.000`
 
-**##💬 Generated Message**
+**## 💬 Generated Message**
 ###The plugin automatically generates a formatted message:
 
 Today Profit/Loss: + 3.000.000 Gil | Starting Bank: 10.000.000 Gil | Final Bank: 5.000.000 Gil
