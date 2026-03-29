@@ -28,23 +28,23 @@ _Sort history by:_
 - Highest results
 - Highest tips
 
-- ↩️ Undo System
+-↩️ Undo System
 _Undo last saved entry instantly_
 
-- 📋 Save to History
+📋 Save to History
 _Manual session saving button added_
 
-- ❓ Help / Formula Tooltip
+❓ Help / Formula Tooltip
  - New help button (?)
  - Hover → temporary tooltip
  - Click → persistent tooltip
  - Click again → close
 
-- 📎 Copy Feedback
+📎 Copy Feedback
  - _Copy button now shows:_
  - `✓ Copied`
 
-- 🎛️ New Command
+🎛️ New Command
  - `/banksettinngs` → opens config window
 
 ## **🛠️ Fixed**
