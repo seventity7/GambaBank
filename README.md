@@ -47,7 +47,7 @@ _Copy button now shows:_
 🎛️ New Command
 `/banksettinngs` → opens config window
 
-##🛠️ Fixed
+## 🛠️ Fixed
 
 🧮 Fixed incorrect result calculations
 📉 Fixed profit/loss logic (tips now included correctly)
