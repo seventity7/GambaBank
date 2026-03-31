@@ -18,7 +18,6 @@
   - Added **Auto Track** toggle for automated player result tracking
   - Can track a selected dealer and react to party chat results automatically
 
-<<<<<<< HEAD
 📊 History System
 _Stores full session data:_
 - Date
@@ -27,7 +26,7 @@ _Stores full session data:_
 - Final Bank
 - Tips
 - Results
-=======
+
 - 🎯 **Dealer tracking**
   - Added **Track Dealer** support based on the current target
   - Allows selecting a specific dealer to monitor instead of reading unrelated chat
@@ -44,7 +43,6 @@ _Stores full session data:_
 - 🧮 **Repeated result detection**
   - Auto Track supports cases where the same player name appears multiple times in one result line
   - Correctly multiplies gains/losses based on how many times the player appears
->>>>>>> fda2887 (Update 1.0.3)
 
 - 💰 **Banking tools**
   - Added quick banking increment buttons:
