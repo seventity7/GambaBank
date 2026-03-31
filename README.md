@@ -1,16 +1,24 @@
-**`Changelog 1.0.2 - 03/29/2026`**
+# `Changelog 1.0.3 - 03/31/2026`
 
-## **✨ Added:**
+## ✨ Added
 
-- Real-time Calculation
-- Results now update instantly while typing
-- Removed need for confirm button
+- 🎭 **Dual Mode system**
+  - Added separate **Dealer** and **Player** modes
+  - Each mode now has its own workflow and dedicated history behavior
 
+- 🏠 **House field**
+  - Added a new **House** input field
+  - Saved to history for better session organization
 
-➕ Tips System
-- Added Tips field fully integrated into calculation
+- 🔎 **History search**
+  - Added a **Search** field to quickly find entries in history
+  - Supports searching across saved session information
 
+- 🤖 **Auto Track system (Player Mode)**
+  - Added **Auto Track** toggle for automated player result tracking
+  - Can track a selected dealer and react to party chat results automatically
 
+<<<<<<< HEAD
 📊 History System
 _Stores full session data:_
 - Date
@@ -19,94 +27,79 @@ _Stores full session data:_
 - Final Bank
 - Tips
 - Results
+=======
+- 🎯 **Dealer tracking**
+  - Added **Track Dealer** support based on the current target
+  - Allows selecting a specific dealer to monitor instead of reading unrelated chat
 
+- 📊 **Player session auto-history**
+  - Player Mode now automatically saves entries to history when tracked results happen
+  - Supports:
+    - Wins
+    - Losses
+    - Busts
+    - Pushes
+    - Banking
 
-🔽 Sorting System
-_Sort history by:_
-- Most recent
-- Oldest (ascending)
-- Highest results
-- Highest tips
+- 🧮 **Repeated result detection**
+  - Auto Track supports cases where the same player name appears multiple times in one result line
+  - Correctly multiplies gains/losses based on how many times the player appears
+>>>>>>> fda2887 (Update 1.0.3)
 
+- 💰 **Banking tools**
+  - Added quick banking increment buttons:
+    - `+50K`
+    - `+100K`
+    - `+250K`
+    - `+500K`
+    - `+1M`
+  - Added manual banking amount field
+  - Added **Add Bank** button to add banking directly to Current Bank
 
-↩️ Undo System
-_Undo last saved entry instantly_
+## 🛠️ Fixed
 
+- 🧷 Fixed multiple Player Mode layout and alignment issues
+- 🧯 Fixed clipping/cropping issues affecting controls in the tracking/banking area
+- 🧹 Fixed compile issues related to helper methods and Dalamud namespace usage
 
-📋 Save to History
-_Manual session saving button added_
+## 🎨 UI Overhaul + Quality of Life
 
+- 🚦 Added status feedback for tracking:
+  - **ON / OFF** tracking state
+  - Temporary round-result feedback such as:
+    - `You won!`
+    - `You Lost!`
+    - `You Busted!`
+    - `Bet Pushed!`
 
-❓ Help / Formula Tooltip
- - New help button (?)
- - Hover → temporary tooltip
- - Click → persistent tooltip
- - Click again → close
+- ⛔ Added protection states for bet input:
+  - **Need Start Bank** when no starting bank is set
+  - **Not enough bank** when Current Bank is too low for the current bet
 
+## 📝 Improved
 
-📎 Copy Feedback
- - _Copy button now shows:_
- - `✓ Copied`
+- 📚 Dealer and Player workflows are much more distinct and easier to use
+- 🗂️ Player History have better reflects round-by-round results
+- 📈 History entries accurately represent:
+  - Start Bank
+  - Total Bank
+  - Result outcome
+  - House
+  - Timestamp
 
+- ⚙️ Auto tracking logic is now more robust for real blackjack hosting scenarios where result messages may contain:
+  - multiple player names
+  - repeated names
+  - mixed result categories in a single line
 
-🎛️ New Command
- - `/banksettinngs` → opens config window
+## 🧾 Notes
 
+- **Player Mode** is designed for automated round tracking and quick personal bankroll management, meant for as you are playing the game
+- **Dealer Mode** remains focused on manual session/result tracking, meant for as you are Dealing the game
+- Auto Track only reacts to the tracked dealer’s party chat messages
+- Push results do not modify Current Bank, but are still saved to history properly
 
-## **🛠️ Fixed**
-
-- 🧮 Fixed incorrect result calculations
-- 📉 Fixed profit/loss logic (tips now included correctly)
-- 🧷 Fixed UI misalignment (labels + fields)
-- 🪟 Fixed window clipping issues
-- 🎨 UI Overhaul
-- 🎯 Layout Improvements
-- 🎨 Button Styling
-- 🟢 Primary buttons (Copy, Save to history)
-- ⚙️ Utility buttons (Undo, Clear History)
-- 🔴 Danger button (Delete Current)
-- ✨ Hover Effects
-- ❓ Help Button
-- 📊 Table Colors
-- 🟡 Date / Bank → gold
-- ⚪ Tips → white
-- 🟢 Results → positive
-- 🔴 Results → negative
-
-
-## **📝 Improved**
-
-- ⚡ Faster input handling
-- 🧠 Cleaner calculation logic
-- 📦 More consistent history formatting
-- 🔄 Improved profile handling
-- 🧾 Better generated message formatting
-- 🎛️ UI / UX
-- ❓ Interactive help system
-- 🧼 Cleaner header layout
-- 🧷 Better spacing between sections
-- 📐 More consistent alignment
-
-
-## **🧾 Notes**
-### _Formula formatting:_
-
-- ✔ Positive results → +
-- ❌ Negative results → -
-- 📂 History is saved per profile
-- 📎 Copy can include timestamp (optional)
-
-
-## **📌 Summary**
-### _This update focuses on:_
-
-- ⚡ Speed (real-time updates)
-- 🎨 UI polish
-- 📊 History & data control
-- 🧠 Better usability and QOL
-
-
-**`End of changelog`**
+`End of changelog`
 
 
 # **💰 Gamba Bank**

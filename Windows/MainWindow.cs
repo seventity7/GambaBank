@@ -4,7 +4,10 @@ using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Text.RegularExpressions;
 using Dalamud.Bindings.ImGui;
+using Dalamud.Game.Text;
+using Dalamud.Game.Text.SeStringHandling;
 using Dalamud.Interface.Windowing;
 
 namespace GambaBank.Windows;
@@ -14,11 +17,21 @@ public class MainWindow : Window, IDisposable
     private string startingBankInput = string.Empty;
     private string finalBankInput = string.Empty;
     private string tipsInput = string.Empty;
+    private string houseInput = string.Empty;
+    private string betInput = string.Empty;
+    private string trackedDealerInput = string.Empty;
+    private string searchInput = string.Empty;
     private string newProfileName = string.Empty;
+    private string bankingInput = string.Empty;
+
+    private bool betInputHasUserEdited;
+    private bool bankingInputHasUserEdited;
 
     private BigInteger startingBankValue;
     private BigInteger finalBankValue;
     private BigInteger tipsValue;
+    private BigInteger betValue;
+    private BigInteger bankingValue;
 
     private string resultsLabel = string.Empty;
     private string startingLabel = string.Empty;
@@ -27,24 +40,51 @@ public class MainWindow : Window, IDisposable
     private string sortBy = "Most recent";
     private DateTime copiedUntilUtc = DateTime.MinValue;
     private bool formulaHelpPinned;
+    private Vector2 pinnedTooltipPosition = Vector2.Zero;
+    private bool hasPinnedTooltipPosition;
 
-    private static readonly Vector2 DefaultWindowSize = new(940f, 520f);
-    private static readonly Vector2 MinimumWindowSize = new(900f, 500f);
+    private bool playerAutoTrackEnabled;
+    private DateTime trackDealerButtonDisabledUntilUtc = DateTime.MinValue;
+    private DateTime currentBetDisplayOverrideUntilUtc = DateTime.MinValue;
+    private string currentBetDisplayOverrideText = string.Empty;
+    private Vector4 currentBetDisplayOverrideColor = new(1f, 1f, 1f, 1f);
+
+    // Add new chat keywords here if your dealer uses different result words.
+    private static readonly string[] WinTrackLabels = { "Win", "Won", "Winners", "Winner", "Wins" };
+    private static readonly string[] LossTrackLabels = { "Loss", "Lost", "Busted", "Losses", "Losts", "Busts", "Busteds"};
+    private static readonly string[] PushTrackLabels = { "Push", "Pushed" };
+
+    private static readonly Regex TrackResultRegex = BuildTrackResultRegex();
+
+    private static readonly Vector2 DefaultWindowSize = new(1080f, 520f);
+    private static readonly Vector2 MinimumWindowSize = new(980f, 470f);
 
     private static readonly Vector4 ProfitColor = new(0.35f, 0.85f, 0.35f, 1.0f);
     private static readonly Vector4 LossColor = new(1.0f, 0.45f, 0.45f, 1.0f);
     private static readonly Vector4 NeutralColor = new(1.0f, 1.0f, 1.0f, 1.0f);
     private static readonly Vector4 GoldColor = new(0.95f, 0.80f, 0.25f, 1.0f);
+    private static readonly Vector4 BlackText = new(0.0f, 0.0f, 0.0f, 1.0f);
 
     private static readonly Vector4 CopyButtonColor = Hex("#005210");
     private static readonly Vector4 UtilityButtonColor = Hex("#005232");
     private static readonly Vector4 DangerButtonColor = Hex("#520000");
     private static readonly Vector4 WhiteText = new(1.0f, 1.0f, 1.0f, 1.0f);
 
+    private static readonly Vector4 DealerButtonColor = Hex("#ffbb00");
+    private static readonly Vector4 PlayerButtonColor = Hex("#006496");
+    private static readonly Vector4 WinButtonColor = Hex("#098500");
+    private static readonly Vector4 LossButtonColor = Hex("#852100");
+    private static readonly Vector4 AutoTrackButtonColor = Hex("#ff7700");
+
     private static readonly Vector4 HelpButtonColor = Hex("#2C2C2C");
     private static readonly Vector4 HelpButtonHoverColor = Hex("#3A3A3A");
     private static readonly Vector4 HelpButtonActiveColor = Hex("#4A4A4A");
     private static readonly Vector4 HelpButtonTextColor = Hex("#FF8A8A");
+
+    private bool IsPlayerMode => string.Equals(Plugin.Configuration.ActiveMode, "Player", StringComparison.OrdinalIgnoreCase);
+    private bool IsDealerMode => !IsPlayerMode;
+    private bool IsTrackDealerButtonDisabled => DateTime.UtcNow < trackDealerButtonDisabledUntilUtc;
+    private bool IsAutoTrackingActive => IsPlayerMode && playerAutoTrackEnabled && !string.IsNullOrWhiteSpace(trackedDealerInput);
 
     public MainWindow()
         : base("Gamba Bank", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
@@ -59,15 +99,17 @@ public class MainWindow : Window, IDisposable
 
         Size = DefaultWindowSize;
         SizeCondition = ImGuiCond.FirstUseEver;
+
+        Plugin.ChatGui.ChatMessage += OnChatMessage;
     }
 
     public void Dispose()
     {
+        Plugin.ChatGui.ChatMessage -= OnChatMessage;
     }
 
     public override void Draw()
     {
-
         DrawProfilesSection();
 
         ImGui.Spacing();
@@ -76,104 +118,20 @@ public class MainWindow : Window, IDisposable
 
         DrawBankFields();
 
-        ImGui.Spacing();
-        ImGui.Separator();
-        ImGui.Spacing();
+        if (IsDealerMode)
+        {
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
 
-        DrawMessageSection();
+            DrawMessageSection();
+        }
 
         ImGui.Spacing();
         ImGui.Separator();
         ImGui.Spacing();
 
         DrawHistorySection();
-    }
-
-    private Vector2 pinnedTooltipPosition = Vector2.Zero;
-    private bool hasPinnedTooltipPosition = false;
-    private void DrawHelpButton()
-    {
-        ImGui.SameLine(ImGui.GetContentRegionAvail().X - 28f);
-
-        bool pressed = DrawStyledBoldButton(
-            "?",
-            "FormulaHelpButton",
-            new Vector2(22f, 20f),
-            HelpButtonColor,
-            HelpButtonTextColor,
-            HelpButtonHoverColor,
-            HelpButtonActiveColor);
-
-        bool hovered = ImGui.IsItemHovered();
-
-        if (pressed)
-        {
-            formulaHelpPinned = !formulaHelpPinned;
-
-            if (formulaHelpPinned)
-            {
-                pinnedTooltipPosition = ImGui.GetMousePos() + new Vector2(12f, 12f);
-                hasPinnedTooltipPosition = true;
-            }
-            else
-            {
-                hasPinnedTooltipPosition = false;
-            }
-        }
-
-        if (hovered && !formulaHelpPinned)
-        {
-            ImGui.BeginTooltip();
-
-            DrawBoldTooltipLine("Math formula:");
-            ImGui.TextUnformatted("{FinalBank} - {StartingBank} - {Tips} = {Results}");
-            ImGui.Spacing();
-            ImGui.TextUnformatted("{FinalBank} minus {StartingBank} minus {Tips} equals a {Results}");
-            ImGui.Spacing();
-            DrawBoldTooltipLine("Final Bank: 5.000.000 - Starting Bank: 2.000.000 - Tips: 1.000.000 = Results: +3.000.000");
-
-            ImGui.EndTooltip();
-        }
-
-        if (formulaHelpPinned && hasPinnedTooltipPosition)
-        {
-            ImGui.SetNextWindowPos(pinnedTooltipPosition, ImGuiCond.Always);
-            ImGui.SetNextWindowBgAlpha(0.98f);
-
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10f, 8f));
-            ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6f);
-
-            ImGui.Begin(
-                "##FormulaHelpPinnedTooltipWindow",
-                ImGuiWindowFlags.NoTitleBar |
-                ImGuiWindowFlags.NoResize |
-                ImGuiWindowFlags.AlwaysAutoResize |
-                ImGuiWindowFlags.NoMove |
-                ImGuiWindowFlags.NoSavedSettings);
-
-            DrawBoldTooltipLine("Math formula:");
-            ImGui.TextUnformatted("{FinalBank} - {StartingBank} - {Tips} = {Results}");
-            ImGui.Spacing();
-            ImGui.TextUnformatted("{FinalBank} minus {StartingBank} minus {Tips} equals a {Results}");
-            ImGui.Spacing();
-            DrawBoldTooltipLine("Final Bank: 5.000.000 - Starting Bank: 2.000.000 - Tips: 1.000.000 = Results: +3.000.000");
-
-            ImGui.End();
-            ImGui.PopStyleVar(2);
-        }
-    }
-
-    private void DrawBoldTooltipLine(string text)
-    {
-        Vector2 pos = ImGui.GetCursorScreenPos();
-        uint col = ImGui.GetColorU32(ImGuiCol.Text);
-        var drawList = ImGui.GetWindowDrawList();
-
-        drawList.AddText(pos, col, text);
-        drawList.AddText(pos + new Vector2(1f, 0f), col, text);
-
-        Vector2 size = ImGui.CalcTextSize(text);
-        ImGui.Dummy(new Vector2(size.X + 1f, size.Y));
     }
 
     private void DrawProfilesSection()
@@ -216,80 +174,443 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton("Delete Current", "DeleteCurrentButton", new Vector2(120f, 0f), DangerButtonColor) && Plugin.Configuration.Profiles.Count > 1)
             DeleteCurrentProfile();
 
-        DrawHelpButton();
+        ImGui.SameLine();
+        AlignTopRightControls(70f + 70f + 22f + (ImGui.GetStyle().ItemSpacing.X * 2f));
 
+        if (DrawStyledBoldButton(
+                "Dealer",
+                "DealerModeButton",
+                new Vector2(70f, 20f),
+                IsDealerMode ? DealerButtonColor : Darken(DealerButtonColor, 0.20f),
+                WhiteText,
+                pulsatingGlow: IsDealerMode))
+        {
+            SetMode("Dealer");
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton(
+                "Player",
+                "PlayerModeButton",
+                new Vector2(70f, 20f),
+                IsPlayerMode ? PlayerButtonColor : Darken(PlayerButtonColor, 0.20f),
+                WhiteText,
+                pulsatingGlow: IsPlayerMode))
+        {
+            SetMode("Player");
+        }
+
+        ImGui.SameLine();
+        DrawHelpButton();
     }
 
     private void DrawBankFields()
     {
-        const float labelWidth = 86f;
-        const float valueWidth = 148f;
-        const float buttonWidth = 115f;
+        if (IsPlayerMode)
+        {
+            DrawPlayerBankFields();
+            return;
+        }
 
-        if (!ImGui.BeginTable("##BankFieldsTable", 5, ImGuiTableFlags.SizingFixedFit))
+        DrawDealerBankFields();
+    }
+
+    private void DrawDealerBankFields()
+    {
+        if (!ImGui.BeginTable("##DealerBankFieldsTable", 7, ImGuiTableFlags.SizingFixedFit))
             return;
 
-        ImGui.TableSetupColumn("Label1", ImGuiTableColumnFlags.WidthFixed, 90f);
-        ImGui.TableSetupColumn("Value1", ImGuiTableColumnFlags.WidthFixed, 150f);
-        ImGui.TableSetupColumn("Label2", ImGuiTableColumnFlags.WidthFixed, 90f);
-        ImGui.TableSetupColumn("Value2", ImGuiTableColumnFlags.WidthFixed, 150f);
-        ImGui.TableSetupColumn("Button", ImGuiTableColumnFlags.WidthFixed, 140f);
+        ImGui.TableSetupColumn("Label1", ImGuiTableColumnFlags.WidthFixed, 95f);
+        ImGui.TableSetupColumn("Value1", ImGuiTableColumnFlags.WidthFixed, 145f);
+        ImGui.TableSetupColumn("Label2", ImGuiTableColumnFlags.WidthFixed, 95f);
+        ImGui.TableSetupColumn("Value2", ImGuiTableColumnFlags.WidthFixed, 145f);
+        ImGui.TableSetupColumn("Label3", ImGuiTableColumnFlags.WidthFixed, 55f);
+        ImGui.TableSetupColumn("Value3", ImGuiTableColumnFlags.WidthFixed, 130f);
+        ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 170f);
 
         ImGui.TableNextRow();
 
-        DrawEditableCell(0, 1, "Starting Bank:", "##StartingBank", ref startingBankInput, ref startingBankValue, valueWidth);
-        DrawEditableCell(2, 3, "Final Bank:", "##FinalBank", ref finalBankInput, ref finalBankValue, valueWidth);
+        DrawEditableNumericCell(
+            0,
+            1,
+            "Starting Bank:",
+            "##StartingBank",
+            ref startingBankInput,
+            ref startingBankValue,
+            145f,
+            OnStartingBankCommitted);
 
-        ImGui.TableSetColumnIndex(4);
-        if (DrawStyledBoldButton("Save to history", "SaveToHistoryButton", new Vector2(buttonWidth, 0f), CopyButtonColor))
+        DrawEditableNumericCell(
+            2,
+            3,
+            "Final Bank:",
+            "##FinalBank",
+            ref finalBankInput,
+            ref finalBankValue,
+            145f);
+
+        DrawEditableTextCell(4, 5, "House:", "##HouseInput", ref houseInput, 130f);
+
+        ImGui.TableSetColumnIndex(6);
+        if (DrawStyledBoldButton("Save", "SaveToHistoryButton", new Vector2(70f, 0f), CopyButtonColor))
             AddHistoryEntry();
 
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Clear", "DealerClearButton", new Vector2(70f, 0f), LossButtonColor, WhiteText))
+            ClearCurrentInputs();
+
         ImGui.TableNextRow();
 
-        ImGui.TableSetColumnIndex(0);
-        ImGui.AlignTextToFramePadding();
-        ImGui.Text("Results:");
+        DrawReadOnlyNumericCell(0, 1, "Results:", "##Results", GetCurrentResultText(), 145f);
 
-        ImGui.TableSetColumnIndex(1);
-        ImGui.SetNextItemWidth(valueWidth);
-        var resultText = GetCurrentResultText();
-        ImGui.BeginDisabled();
-        ImGui.InputText("##Results", ref resultText, 128, ImGuiInputTextFlags.ReadOnly);
-        ImGui.EndDisabled();
-
-        DrawEditableCell(2, 3, "Tips:", "##Tips", ref tipsInput, ref tipsValue, valueWidth);
+        DrawEditableNumericCell(
+            2,
+            3,
+            "Tips:",
+            "##Tips",
+            ref tipsInput,
+            ref tipsValue,
+            145f);
 
         ImGui.EndTable();
     }
 
-    private void DrawEditableCell(
-        int labelColumn,
-        int valueColumn,
-        string label,
-        string inputId,
-        ref string inputText,
-        ref BigInteger numericValue,
-        float valueWidth)
+    private void DrawPlayerBankFields()
     {
-        ImGui.TableSetColumnIndex(labelColumn);
-        ImGui.AlignTextToFramePadding();
-        ImGui.Text(label);
+        DrawSectionTitle("☆ Bank Tracking");
+        ImGui.Dummy(new Vector2(0f, 2f));
 
-        ImGui.TableSetColumnIndex(valueColumn);
-        ImGui.SetNextItemWidth(valueWidth);
-
-        bool confirmedByEnter = ImGui.InputText(inputId, ref inputText, 256, ImGuiInputTextFlags.EnterReturnsTrue);
-        bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
-
-        if (confirmedByEnter || confirmedByFocusLoss)
+        if (ImGui.BeginTable("##PlayerTopBankFieldsTable", 3, ImGuiTableFlags.SizingFixedFit))
         {
-            numericValue = ParseBankValue(inputText);
-            inputText = FormatNumber(numericValue);
-            SaveCurrentProfileValues();
+            ImGui.TableSetupColumn("PlayerLeftColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
+            ImGui.TableSetupColumn("PlayerCenterColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
+            ImGui.TableSetupColumn("PlayerActionColumn", ImGuiTableColumnFlags.WidthFixed, 96f);
+
+            ImGui.TableNextRow();
+
+            ImGui.TableSetColumnIndex(0);
+            DrawPlayerLeftFields();
+
+            ImGui.TableSetColumnIndex(1);
+            DrawPlayerCenterFields();
+
+            ImGui.TableSetColumnIndex(2);
+            DrawPlayerActionButtons();
+
+            ImGui.EndTable();
         }
+
+        ImGui.Spacing();
+        ImGui.Separator();
+        ImGui.Spacing();
+
+        DrawSectionTitle("♯ Bet Tracking");
+        ImGui.Dummy(new Vector2(0f, 2f));
+        DrawPlayerTrackingLayout();
     }
 
-    private void DrawMessageSection()
+    private void DrawPlayerLeftFields()
+    {
+        if (!ImGui.BeginTable("##PlayerLeftFieldsTable", 2, ImGuiTableFlags.SizingFixedFit))
+            return;
+
+        ImGui.TableSetupColumn("PlayerLeftLabel", ImGuiTableColumnFlags.WidthFixed, 95f);
+        ImGui.TableSetupColumn("PlayerLeftValue", ImGuiTableColumnFlags.WidthFixed, 145f);
+
+        ImGui.TableNextRow();
+        DrawEditableNumericCell(
+            0,
+            1,
+            "Starting Bank:",
+            "##StartingBank",
+            ref startingBankInput,
+            ref startingBankValue,
+            145f,
+            OnStartingBankCommitted);
+
+        ImGui.TableNextRow();
+        DrawEditableTextCell(0, 1, "House:", "##HouseInput", ref houseInput, 145f);
+
+        ImGui.EndTable();
+    }
+
+
+    private void DrawPlayerCenterFields()
+    {
+        if (!ImGui.BeginTable("##PlayerCenterFieldsTable", 2, ImGuiTableFlags.SizingFixedFit))
+            return;
+
+        ImGui.TableSetupColumn("PlayerCenterLabel", ImGuiTableColumnFlags.WidthFixed, 95f);
+        ImGui.TableSetupColumn("PlayerCenterValue", ImGuiTableColumnFlags.WidthFixed, 145f);
+
+        ImGui.TableNextRow();
+        var currentBankColor = finalBankValue < startingBankValue ? LossColor : NeutralColor;
+        DrawReadOnlyNumericCell(0, 1, "Current Bank:", "##CurrentBank", finalBankInput, 145f, currentBankColor);
+
+        ImGui.TableNextRow();
+        DrawReadOnlyNumericCell(0, 1, "Results:", "##Results", GetCurrentResultText(), 145f);
+
+        ImGui.EndTable();
+    }
+
+
+    private void DrawPlayerActionButtons()
+    {
+        const float actionButtonWidth = 82f;
+
+        if (!ImGui.BeginTable("##PlayerActionButtonsTable", 1, ImGuiTableFlags.SizingFixedFit))
+            return;
+
+        ImGui.TableSetupColumn("PlayerActionButtonsColumn", ImGuiTableColumnFlags.WidthFixed, actionButtonWidth);
+
+        ImGui.TableNextRow();
+        ImGui.TableSetColumnIndex(0);
+        if (DrawStyledBoldButton("Save", "SaveToHistoryButton", new Vector2(actionButtonWidth, 0f), CopyButtonColor))
+            AddHistoryEntry();
+
+        ImGui.TableNextRow();
+        ImGui.TableSetColumnIndex(0);
+        if (DrawStyledBoldButton("Clear", "PlayerClearButton", new Vector2(actionButtonWidth, 0f), LossButtonColor, WhiteText))
+            ClearCurrentInputs();
+
+        ImGui.EndTable();
+    }
+
+
+
+
+
+
+private void DrawPlayerTrackingLayout()
+{
+    const float labelWidth = 96f;
+    const float betFieldWidth = 140f;
+    const float middleSpacerWidth = 16f;
+    const float dealerBlockWidth = 145f;
+    const float separatorColumnWidth = 14f;
+    const float bankingFieldWidth = 168f;
+
+    float spacing = ImGui.GetStyle().ItemSpacing.X;
+    float winLossButtonWidth = (betFieldWidth - spacing) * 0.5f;
+    float bankingThreeButtonWidth = (bankingFieldWidth - (spacing * 2f)) / 3f;
+    float bankingTwoButtonWidth = (bankingFieldWidth - spacing) * 0.5f;
+
+    GetTrackingStatusDisplay(out var statusText, out var statusColor);
+    GetCurrentBetDisplay(out var currentBetOverrideText, out var currentBetOverrideColor);
+
+    bool startingBankMissing = startingBankValue <= BigInteger.Zero;
+    BigInteger currentBetAmount = ParseBankValue(betInput);
+    bool notEnoughBank = !startingBankMissing && currentBetAmount > BigInteger.Zero && finalBankValue < currentBetAmount;
+
+    string? currentBetDisplayText;
+    Vector4? currentBetDisplayColor;
+
+    if (startingBankMissing)
+    {
+        currentBetDisplayText = "Need Start Bank";
+        currentBetDisplayColor = LossColor;
+    }
+    else if (notEnoughBank)
+    {
+        currentBetDisplayText = "Not enough bank";
+        currentBetDisplayColor = LossColor;
+    }
+    else
+    {
+        currentBetDisplayText = currentBetOverrideText;
+        currentBetDisplayColor = currentBetOverrideColor;
+    }
+
+    string? bankingDisplayText = null;
+    Vector4? bankingDisplayColor = null;
+    bool bankingIsZero = bankingValue == BigInteger.Zero && ParseBankValue(bankingInput) == BigInteger.Zero;
+    if (bankingIsZero)
+    {
+        bankingDisplayText = "0";
+        bankingDisplayColor = LossColor;
+    }
+
+    if (!ImGui.BeginTable("##PlayerTrackingUnifiedLayout", 6, ImGuiTableFlags.SizingFixedFit))
+        return;
+
+    ImGui.TableSetupColumn("TrackingLabelColumn", ImGuiTableColumnFlags.WidthFixed, labelWidth);
+    ImGui.TableSetupColumn("TrackingLeftControlsColumn", ImGuiTableColumnFlags.WidthFixed, betFieldWidth);
+    ImGui.TableSetupColumn("TrackingMiddleSpacerColumn", ImGuiTableColumnFlags.WidthFixed, middleSpacerWidth);
+    ImGui.TableSetupColumn("TrackingDealerColumn", ImGuiTableColumnFlags.WidthFixed, dealerBlockWidth);
+    ImGui.TableSetupColumn("TrackingSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, separatorColumnWidth);
+    ImGui.TableSetupColumn("TrackingBankingColumn", ImGuiTableColumnFlags.WidthFixed, bankingFieldWidth);
+
+    // Row 1
+    ImGui.TableNextRow();
+
+    DrawCenteredEditableNumericCell(
+        0,
+        1,
+        "$ Current Bet:",
+        "##BetValue",
+        ref betInput,
+        ref betValue,
+        betFieldWidth,
+        ref betInputHasUserEdited,
+        !startingBankMissing && !notEnoughBank,
+        null,
+        currentBetDisplayText,
+        currentBetDisplayColor);
+
+    ImGui.TableSetColumnIndex(2);
+    ImGui.Dummy(Vector2.Zero);
+
+    ImGui.TableSetColumnIndex(3);
+    ImGui.SetNextItemWidth(dealerBlockWidth);
+    bool confirmedByEnter = ImGui.InputText("##TrackedDealerInput", ref trackedDealerInput, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+    bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+
+    if (confirmedByEnter || confirmedByFocusLoss)
+    {
+        trackedDealerInput = StripWorldSuffix(trackedDealerInput);
+        SaveCurrentProfileValues();
+    }
+
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+
+    ImGui.TableSetColumnIndex(5);
+    DrawCenteredNumericInputField(
+        "##BankingValue",
+        ref bankingInput,
+        ref bankingValue,
+        bankingFieldWidth,
+        ref bankingInputHasUserEdited,
+        true,
+        null,
+        bankingDisplayText,
+        bankingDisplayColor,
+        0f,
+        true,
+        true);
+
+    // Row 2
+    ImGui.TableNextRow();
+
+    ImGui.TableSetColumnIndex(0);
+    ImGui.AlignTextToFramePadding();
+    ImGui.TextUnformatted("Tracking:");
+    ImGui.SameLine(0f, 2f);
+    DrawBoldColoredText(statusText, statusColor);
+
+    ImGui.TableSetColumnIndex(1);
+    if (DrawStyledBoldButton("WIN ↑", "WinBetButton", new Vector2(winLossButtonWidth, 0f), WinButtonColor, WhiteText))
+        ApplyBetResult(true);
+
+    ImGui.SameLine();
+    if (DrawStyledBoldButton("↓ LOSS", "LossBetButton", new Vector2(winLossButtonWidth, 0f), LossButtonColor, WhiteText))
+        ApplyBetResult(false);
+
+    ImGui.TableSetColumnIndex(2);
+    ImGui.Dummy(Vector2.Zero);
+
+    ImGui.TableSetColumnIndex(3);
+    if (IsTrackDealerButtonDisabled)
+        ImGui.BeginDisabled();
+
+    bool hasTrackedDealer = !string.IsNullOrWhiteSpace(trackedDealerInput);
+    string trackButtonText = IsTrackDealerButtonDisabled
+        ? "Target not found"
+        : hasTrackedDealer ? "● Tracking Dealer:" : "○ Track Dealer";
+    Vector4 trackButtonTextColor = IsTrackDealerButtonDisabled ? BlackText : WhiteText;
+
+    if (DrawStyledBoldButton(trackButtonText, "TrackDealerButton", new Vector2(dealerBlockWidth, 0f), UtilityButtonColor, trackButtonTextColor) && !IsTrackDealerButtonDisabled)
+        TrackDealerFromCurrentTarget();
+
+    if (IsTrackDealerButtonDisabled)
+        ImGui.EndDisabled();
+
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+
+    ImGui.TableSetColumnIndex(5);
+    if (DrawStyledBoldButton("Add Bank", "ApplyBankingButton", new Vector2(bankingFieldWidth, 0f), CopyButtonColor, WhiteText))
+        ApplyBankingAdjustment();
+
+    // Row 3
+    ImGui.TableNextRow();
+
+    ImGui.TableSetColumnIndex(0);
+    ImGui.Dummy(Vector2.Zero);
+
+    ImGui.TableSetColumnIndex(1);
+    string autoTrackText = playerAutoTrackEnabled ? "● Auto Track" : "○ Auto Track";
+    if (DrawStyledBoldButton(autoTrackText, "AutoTrackButton", new Vector2(betFieldWidth, 0f), AutoTrackButtonColor, WhiteText))
+    {
+        playerAutoTrackEnabled = !playerAutoTrackEnabled;
+        SaveCurrentProfileValues();
+    }
+
+    ImGui.TableSetColumnIndex(2);
+    ImGui.Dummy(Vector2.Zero);
+
+    ImGui.TableSetColumnIndex(3);
+    if (DrawStyledBoldButton("Clear", "ClearTrackedDealerButton", new Vector2(dealerBlockWidth, 0f), LossButtonColor, WhiteText))
+    {
+        trackedDealerInput = string.Empty;
+        SaveCurrentProfileValues();
+    }
+
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+
+    ImGui.TableSetColumnIndex(5);
+    if (DrawStyledBoldButton("+50K", "AddBanking50KButton", new Vector2(bankingThreeButtonWidth, 0f), HexWithAlpha("#852100", 0.60f), WhiteText))
+        IncrementBankingValue(50_000);
+
+    ImGui.SameLine();
+    if (DrawStyledBoldButton("+100K", "AddBanking100KButton", new Vector2(bankingThreeButtonWidth, 0f), HexWithAlpha("#950e44", 0.70f), WhiteText))
+        IncrementBankingValue(100_000);
+
+    ImGui.SameLine();
+    if (DrawStyledBoldButton("+250K", "AddBanking250KButton", new Vector2(bankingThreeButtonWidth, 0f), HexWithAlpha("#82327a", 0.80f), WhiteText))
+        IncrementBankingValue(250_000);
+
+    // Row 4
+    ImGui.TableNextRow();
+
+    ImGui.TableSetColumnIndex(0);
+    ImGui.Dummy(Vector2.Zero);
+    ImGui.TableSetColumnIndex(1);
+    ImGui.Dummy(Vector2.Zero);
+    ImGui.TableSetColumnIndex(2);
+    ImGui.Dummy(Vector2.Zero);
+    ImGui.TableSetColumnIndex(3);
+    ImGui.Dummy(Vector2.Zero);
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+    ImGui.TableSetColumnIndex(5);
+    if (DrawStyledBoldButton("+500K", "AddBanking500KButton", new Vector2(bankingTwoButtonWidth, 0f), HexWithAlpha("#525198", 0.90f), WhiteText))
+        IncrementBankingValue(500_000);
+
+    ImGui.SameLine();
+    if (DrawStyledBoldButton("+1M", "AddBanking1MButton", new Vector2(bankingTwoButtonWidth, 0f), HexWithAlpha("#006496", 1.00f), WhiteText))
+        IncrementBankingValue(1_000_000);
+
+    ImGui.EndTable();
+}
+
+private void DrawMiniVerticalSeparator()
+{
+    Vector2 start = ImGui.GetCursorScreenPos();
+    float height = ImGui.GetFrameHeight();
+    float x = start.X + 6f;
+    uint separatorColor = ImGui.GetColorU32(ImGuiCol.Separator);
+    ImGui.GetWindowDrawList().AddLine(
+        new Vector2(x, start.Y),
+        new Vector2(x, start.Y + height),
+        separatorColor,
+        1f);
+    ImGui.Dummy(new Vector2(12f, height));
+}
+
+private void DrawMessageSection()
+
     {
         var includeTimestamp = Plugin.Configuration.IncludeTimestampInMessage;
         if (ImGui.Checkbox("Include timestamp in message", ref includeTimestamp))
@@ -321,6 +642,11 @@ public class MainWindow : Window, IDisposable
 
     private void DrawHistorySection()
     {
+        ImGui.PushStyleColor(ImGuiCol.Text, Hex("#ffbb00"));
+        ImGui.Text(IsPlayerMode ? "★ Player History" : "★ Dealer History");
+        ImGui.PopStyleColor();
+        ImGui.Spacing();
+
         ImGui.Text("Sort by:");
         ImGui.SameLine();
 
@@ -330,9 +656,19 @@ public class MainWindow : Window, IDisposable
             DrawSortOption("Most recent");
             DrawSortOption("Ascending");
             DrawSortOption("Results");
-            DrawSortOption("Tips");
+
+            if (IsDealerMode)
+                DrawSortOption("Tips");
+
             ImGui.EndCombo();
         }
+
+        ImGui.SameLine();
+        ImGui.Text("Search:");
+        ImGui.SameLine();
+
+        ImGui.SetNextItemWidth(190f);
+        ImGui.InputText("##HistorySearch", ref searchInput, 128);
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("Undo", "UndoButton", new Vector2(70f, 0f), UtilityButtonColor))
@@ -341,7 +677,7 @@ public class MainWindow : Window, IDisposable
         ImGui.SameLine();
         if (DrawStyledBoldButton("Clear History", "ClearHistoryButton", new Vector2(115f, 0f), UtilityButtonColor))
         {
-            Plugin.Configuration.GetOrCreateActiveProfile().History.Clear();
+            GetCurrentHistory().Clear();
             Plugin.Configuration.Save();
         }
 
@@ -349,46 +685,403 @@ public class MainWindow : Window, IDisposable
         DrawProfitsLossesSummary();
 
         var sortedHistory = GetSortedHistory();
+        int columnCount = IsPlayerMode ? 5 : 6;
 
-        if (!ImGui.BeginTable("##HistoryTable", 6, ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY, new Vector2(0f, 250f)))
+        ImGui.Dummy(new Vector2(0f, 1.5f));
+
+        if (!ImGui.BeginTable(
+                "##HistoryTable",
+                columnCount,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.ScrollY,
+                new Vector2(0f, 260f)))
             return;
 
-        ImGui.TableSetupColumn("Date", ImGuiTableColumnFlags.WidthFixed, 110f);
-        ImGui.TableSetupColumn("Time", ImGuiTableColumnFlags.WidthFixed, 90f);
+        ImGui.TableSetupColumn("House", ImGuiTableColumnFlags.WidthFixed, 135f);
+        ImGui.TableSetupColumn("Time", ImGuiTableColumnFlags.WidthFixed, 150f);
         ImGui.TableSetupColumn("Start Bank", ImGuiTableColumnFlags.WidthFixed, 140f);
-        ImGui.TableSetupColumn("Final Bank", ImGuiTableColumnFlags.WidthFixed, 140f);
-        ImGui.TableSetupColumn("Tips", ImGuiTableColumnFlags.WidthFixed, 120f);
+        ImGui.TableSetupColumn(IsPlayerMode ? "Total Bank" : "Final Bank", ImGuiTableColumnFlags.WidthFixed, 140f);
+
+        if (IsDealerMode)
+            ImGui.TableSetupColumn("Tips", ImGuiTableColumnFlags.WidthFixed, 120f);
+
         ImGui.TableSetupColumn("Results", ImGuiTableColumnFlags.WidthFixed, 140f);
         ImGui.TableHeadersRow();
 
         foreach (var entry in sortedHistory)
         {
-            SplitTimestamp(entry.Timestamp, out var datePart, out var timePart);
-
             ImGui.TableNextRow();
 
             ImGui.TableSetColumnIndex(0);
-            DrawColoredCell(datePart, GoldColor);
+            DrawColoredCell(entry.House, NeutralColor);
 
             ImGui.TableSetColumnIndex(1);
-            DrawColoredCell(timePart, NeutralColor);
+            DrawColoredCell(entry.Timestamp, GoldColor);
 
             ImGui.TableSetColumnIndex(2);
             DrawColoredCell(entry.StartingBank, GoldColor);
 
             ImGui.TableSetColumnIndex(3);
-            DrawColoredCell(entry.FinalBank, GoldColor);
+            var totalBankParsed = ParseSignedFormatted(entry.FinalBank);
+            var totalBankColor = totalBankParsed > BigInteger.Zero
+                ? ProfitColor
+                : totalBankParsed < BigInteger.Zero
+                    ? LossColor
+                    : GoldColor;
+            DrawColoredCell(entry.FinalBank, totalBankColor);
 
-            ImGui.TableSetColumnIndex(4);
-            DrawColoredCell(entry.Tips, NeutralColor);
+            if (IsDealerMode)
+            {
+                ImGui.TableSetColumnIndex(4);
+                DrawColoredCell(entry.Tips, NeutralColor);
 
-            ImGui.TableSetColumnIndex(5);
+                ImGui.TableSetColumnIndex(5);
+            }
+            else
+            {
+                ImGui.TableSetColumnIndex(4);
+            }
+
             var resultColor = ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
             DrawColoredCell(entry.Result, resultColor);
         }
 
         ImGui.EndTable();
     }
+
+    private void DrawHelpButton()
+    {
+        bool pressed = DrawStyledBoldButton(
+            "?",
+            "FormulaHelpButton",
+            new Vector2(22f, 20f),
+            HelpButtonColor,
+            HelpButtonTextColor,
+            HelpButtonHoverColor,
+            HelpButtonActiveColor);
+
+        bool hovered = ImGui.IsItemHovered();
+
+        if (pressed)
+        {
+            formulaHelpPinned = !formulaHelpPinned;
+
+            if (formulaHelpPinned)
+            {
+                pinnedTooltipPosition = ImGui.GetMousePos() + new Vector2(12f, 12f);
+                hasPinnedTooltipPosition = true;
+            }
+            else
+            {
+                hasPinnedTooltipPosition = false;
+            }
+        }
+
+        if (hovered && !formulaHelpPinned)
+        {
+            ImGui.BeginTooltip();
+            DrawFormulaTooltipContent();
+            ImGui.EndTooltip();
+        }
+
+        if (formulaHelpPinned && hasPinnedTooltipPosition)
+        {
+            ImGui.SetNextWindowPos(pinnedTooltipPosition, ImGuiCond.Always);
+            ImGui.SetNextWindowBgAlpha(0.98f);
+
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(10f, 8f));
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowRounding, 6f);
+
+            ImGui.Begin(
+                "##FormulaHelpPinnedTooltipWindow",
+                ImGuiWindowFlags.NoTitleBar |
+                ImGuiWindowFlags.NoResize |
+                ImGuiWindowFlags.AlwaysAutoResize |
+                ImGuiWindowFlags.NoMove |
+                ImGuiWindowFlags.NoSavedSettings);
+
+            DrawFormulaTooltipContent();
+
+            ImGui.End();
+            ImGui.PopStyleVar(2);
+        }
+    }
+
+    private void DrawFormulaTooltipContent()
+    {
+        if (IsPlayerMode)
+        {
+            DrawBoldTooltipLine("Player mode:");
+            ImGui.TextUnformatted("{CurrentBank} - {StartingBank} = {Results}");
+            ImGui.Spacing();
+            ImGui.TextUnformatted("WIN adds {Bet} to {CurrentBank}");
+            ImGui.TextUnformatted("LOSS subtracts {Bet} from {CurrentBank}");
+            ImGui.Spacing();
+            DrawBoldTooltipLine("Current Bank: 10.000.000 - Starting Bank: 5.000.000 = Results: + 5.000.000");
+            return;
+        }
+
+        DrawBoldTooltipLine("Dealer mode:");
+        ImGui.TextUnformatted("{FinalBank} - {StartingBank} - {Tips} = {Results}");
+        ImGui.Spacing();
+        ImGui.TextUnformatted("{FinalBank} minus {StartingBank} minus {Tips} equals {Results}");
+        ImGui.Spacing();
+        DrawBoldTooltipLine("Final Bank: 5.000.000 - Starting Bank: 2.000.000 - Tips: 1.000.000 = Results: + 2.000.000");
+    }
+
+    private void DrawBoldTooltipLine(string text)
+    {
+        Vector2 pos = ImGui.GetCursorScreenPos();
+        uint col = ImGui.GetColorU32(ImGuiCol.Text);
+        var drawList = ImGui.GetWindowDrawList();
+
+        drawList.AddText(pos, col, text);
+        drawList.AddText(pos + new Vector2(1f, 0f), col, text);
+
+        Vector2 size = ImGui.CalcTextSize(text);
+        ImGui.Dummy(new Vector2(size.X + 1f, size.Y));
+    }
+
+    private void DrawEditableNumericCell(
+        int labelColumn,
+        int valueColumn,
+        string label,
+        string inputId,
+        ref string inputText,
+        ref BigInteger numericValue,
+        float valueWidth,
+        Action? afterCommit = null)
+    {
+        ImGui.TableSetColumnIndex(labelColumn);
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(label);
+
+        ImGui.TableSetColumnIndex(valueColumn);
+        ImGui.SetNextItemWidth(valueWidth);
+
+        bool confirmedByEnter = ImGui.InputText(inputId, ref inputText, 256, ImGuiInputTextFlags.EnterReturnsTrue);
+        bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+
+        if (confirmedByEnter || confirmedByFocusLoss)
+        {
+            numericValue = ParseBankValue(inputText);
+            inputText = FormatNumber(numericValue);
+            afterCommit?.Invoke();
+            SaveCurrentProfileValues();
+        }
+    }
+
+    private void DrawEditableTextCell(
+        int labelColumn,
+        int valueColumn,
+        string label,
+        string inputId,
+        ref string inputText,
+        float valueWidth)
+    {
+        ImGui.TableSetColumnIndex(labelColumn);
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(label);
+
+        ImGui.TableSetColumnIndex(valueColumn);
+        ImGui.SetNextItemWidth(valueWidth);
+
+        bool confirmedByEnter = ImGui.InputText(inputId, ref inputText, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+        bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+
+        if (confirmedByEnter || confirmedByFocusLoss)
+            SaveCurrentProfileValues();
+    }
+
+
+    private void DrawCenteredEditableNumericCell(
+        int labelColumn,
+        int valueColumn,
+        string label,
+        string inputId,
+        ref string inputText,
+        ref BigInteger numericValue,
+        float valueWidth,
+        ref bool hasUserEdited,
+        bool isInputEnabled,
+        Action? afterCommit = null,
+        string? displayOverrideText = null,
+        Vector4? displayOverrideColor = null,
+        float valueOffsetX = 0f,
+        bool drawBoldDisplay = false,
+        bool clearDisplayOverrideOnActivate = false)
+    {
+        ImGui.TableSetColumnIndex(labelColumn);
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(label);
+
+        ImGui.TableSetColumnIndex(valueColumn);
+        DrawCenteredNumericInputField(
+            inputId,
+            ref inputText,
+            ref numericValue,
+            valueWidth,
+            ref hasUserEdited,
+            isInputEnabled,
+            afterCommit,
+            displayOverrideText,
+            displayOverrideColor,
+            valueOffsetX,
+            drawBoldDisplay,
+            clearDisplayOverrideOnActivate);
+    }
+
+    private void DrawCenteredNumericInputField(
+        string inputId,
+        ref string inputText,
+        ref BigInteger numericValue,
+        float valueWidth,
+        ref bool hasUserEdited,
+        bool isInputEnabled = true,
+        Action? afterCommit = null,
+        string? displayOverrideText = null,
+        Vector4? displayOverrideColor = null,
+        float valueOffsetX = 0f,
+        bool drawBoldDisplay = false,
+        bool clearDisplayOverrideOnActivate = false)
+    {
+        if (Math.Abs(valueOffsetX) > 0.001f)
+            NudgeCursorX(valueOffsetX);
+
+        ImGui.SetNextItemWidth(valueWidth);
+
+        if (!isInputEnabled)
+            ImGui.BeginDisabled();
+
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 0f));
+        bool confirmedByEnter = ImGui.InputText(inputId, ref inputText, 256, ImGuiInputTextFlags.EnterReturnsTrue);
+        bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+        bool isActive = ImGui.IsItemActive();
+        bool isActivated = ImGui.IsItemActivated();
+        ImGui.PopStyleColor();
+
+        if (!isInputEnabled)
+            ImGui.EndDisabled();
+
+        if (isInputEnabled &&
+            isActivated &&
+            !hasUserEdited &&
+            numericValue == BigInteger.Zero &&
+            ParseBankValue(inputText) == BigInteger.Zero)
+        {
+            inputText = string.Empty;
+        }
+
+        string? effectiveDisplayOverrideText = displayOverrideText;
+        if (clearDisplayOverrideOnActivate && isActive && numericValue == BigInteger.Zero && ParseBankValue(inputText) == BigInteger.Zero)
+            effectiveDisplayOverrideText = null;
+
+        string displayText;
+        if (!string.IsNullOrWhiteSpace(effectiveDisplayOverrideText))
+        {
+            displayText = effectiveDisplayOverrideText;
+        }
+        else if (isActive && !hasUserEdited && numericValue == BigInteger.Zero && string.IsNullOrWhiteSpace(inputText))
+        {
+            displayText = string.Empty;
+        }
+        else
+        {
+            displayText = string.IsNullOrWhiteSpace(inputText) ? "0" : inputText;
+        }
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        Vector2 textSize = ImGui.CalcTextSize(displayText);
+        Vector2 textPos = new(
+            min.X + ((max.X - min.X) - textSize.X) * 0.5f,
+            min.Y + ((max.Y - min.Y) - textSize.Y) * 0.5f);
+
+        uint drawColor = ImGui.ColorConvertFloat4ToU32(displayOverrideColor ?? NeutralColor);
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddText(textPos, drawColor, displayText);
+        if (drawBoldDisplay && !string.IsNullOrWhiteSpace(displayText))
+            drawList.AddText(textPos + new Vector2(1f, 0f), drawColor, displayText);
+
+        bool showCaret = isInputEnabled && isActive && string.IsNullOrWhiteSpace(effectiveDisplayOverrideText);
+        if (showCaret && ((int)(ImGui.GetTime() * 1.8f) % 2 == 0))
+        {
+            float caretX = textPos.X + textSize.X + 1f;
+            float caretTop = min.Y + 4f;
+            float caretBottom = max.Y - 4f;
+            uint caretColor = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, 0.95f));
+            drawList.AddLine(new Vector2(caretX, caretTop), new Vector2(caretX, caretBottom), caretColor, 1.5f);
+        }
+
+        if (confirmedByEnter || confirmedByFocusLoss)
+        {
+            bool hadAnyText = !string.IsNullOrWhiteSpace(inputText);
+            numericValue = ParseBankValue(inputText);
+            inputText = FormatNumber(numericValue);
+            hasUserEdited = hadAnyText && numericValue != BigInteger.Zero;
+            afterCommit?.Invoke();
+            SaveCurrentProfileValues();
+        }
+    }
+
+
+
+    private void DrawSectionTitle(string text)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, Hex("#ffbb00"));
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+    }
+
+    private void DrawBoldColoredText(string text, Vector4 color)
+    {
+        Vector2 pos = ImGui.GetCursorScreenPos();
+        uint col = ImGui.ColorConvertFloat4ToU32(color);
+        var drawList = ImGui.GetWindowDrawList();
+
+        drawList.AddText(pos, col, text);
+        drawList.AddText(pos + new Vector2(1f, 0f), col, text);
+
+        Vector2 size = ImGui.CalcTextSize(text);
+        ImGui.Dummy(new Vector2(size.X + 1f, size.Y));
+    }
+
+    private void NudgeCursorX(float amount)
+    {
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + amount);
+    }
+
+    private void DrawReadOnlyNumericCell(
+        int labelColumn,
+        int valueColumn,
+        string label,
+        string inputId,
+        string displayValue,
+        float valueWidth,
+        Vector4? valueColor = null)
+    {
+        ImGui.TableSetColumnIndex(labelColumn);
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(label);
+
+        ImGui.TableSetColumnIndex(valueColumn);
+        ImGui.SetNextItemWidth(valueWidth);
+
+        string valueCopy = displayValue;
+
+        if (valueColor.HasValue)
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, valueColor.Value);
+            ImGui.PushStyleColor(ImGuiCol.TextDisabled, valueColor.Value);
+        }
+
+        ImGui.BeginDisabled();
+        ImGui.InputText(inputId, ref valueCopy, 128, ImGuiInputTextFlags.ReadOnly);
+        ImGui.EndDisabled();
+
+        if (valueColor.HasValue)
+            ImGui.PopStyleColor(2);
+    }
+
 
     private void DrawColoredCell(string text, Vector4 color)
     {
@@ -399,7 +1092,7 @@ public class MainWindow : Window, IDisposable
 
     private void DrawProfitsLossesSummary()
     {
-        var history = Plugin.Configuration.GetOrCreateActiveProfile().History;
+        var history = GetCurrentHistory();
 
         BigInteger totalProfits = BigInteger.Zero;
         BigInteger totalLosses = BigInteger.Zero;
@@ -419,13 +1112,18 @@ public class MainWindow : Window, IDisposable
                 totalLosses += BigInteger.Abs(result);
         }
 
+        ImGui.PushStyleColor(ImGuiCol.Text, NeutralColor);
+        ImGui.TextUnformatted(" ♯ All time ");
+        ImGui.PopStyleColor();
+
+        ImGui.SameLine(0f, 0f);
         ImGui.PushStyleColor(ImGuiCol.Text, ProfitColor);
         ImGui.TextUnformatted("Profits");
         ImGui.PopStyleColor();
 
         ImGui.SameLine(0f, 0f);
         ImGui.PushStyleColor(ImGuiCol.Text, NeutralColor);
-        ImGui.TextUnformatted(" / ");
+        ImGui.TextUnformatted("/");
         ImGui.PopStyleColor();
 
         ImGui.SameLine(0f, 0f);
@@ -433,24 +1131,24 @@ public class MainWindow : Window, IDisposable
         ImGui.TextUnformatted("Losses");
         ImGui.PopStyleColor();
 
-        ImGui.SameLine(0f, 6f);
+        ImGui.SameLine(0f, 0f);
         ImGui.PushStyleColor(ImGuiCol.Text, NeutralColor);
         ImGui.TextUnformatted(": ");
         ImGui.PopStyleColor();
 
         ImGui.SameLine(0f, 0f);
         ImGui.PushStyleColor(ImGuiCol.Text, ProfitColor);
-        ImGui.TextUnformatted($"+{FormatNumber(totalProfits)}");
+        ImGui.TextUnformatted($"↑{FormatNumber(totalProfits)}");
         ImGui.PopStyleColor();
 
         ImGui.SameLine(0f, 0f);
         ImGui.PushStyleColor(ImGuiCol.Text, NeutralColor);
-        ImGui.TextUnformatted(" / ");
+        ImGui.TextUnformatted(" /");
         ImGui.PopStyleColor();
 
         ImGui.SameLine(0f, 0f);
         ImGui.PushStyleColor(ImGuiCol.Text, LossColor);
-        ImGui.TextUnformatted($"-{FormatNumber(totalLosses)}");
+        ImGui.TextUnformatted($"↓{FormatNumber(totalLosses)}");
         ImGui.PopStyleColor();
     }
 
@@ -461,7 +1159,8 @@ public class MainWindow : Window, IDisposable
         Vector4 baseColor,
         Vector4? textColorOverride = null,
         Vector4? hoverColorOverride = null,
-        Vector4? activeColorOverride = null)
+        Vector4? activeColorOverride = null,
+        bool pulsatingGlow = false)
     {
         Vector4 hoverColor = hoverColorOverride ?? Lighten(baseColor, 0.18f);
         Vector4 activeColor = activeColorOverride ?? Lighten(baseColor, 0.08f);
@@ -482,8 +1181,24 @@ public class MainWindow : Window, IDisposable
             min.Y + ((max.Y - min.Y) - textSize.Y) * 0.5f);
 
         var drawList = ImGui.GetWindowDrawList();
-        uint drawColor = ImGui.ColorConvertFloat4ToU32(textColor);
 
+        if (pulsatingGlow)
+        {
+            float pulse = 0.55f + (0.45f * (float)((Math.Sin(ImGui.GetTime() * 4.5f) + 1.0) * 0.5));
+            float glowAlpha = 0.10f + (0.14f * pulse);
+            uint glowColor = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, glowAlpha));
+
+            Vector2[] glowOffsets =
+            {
+                new(-2f, 0f), new(2f, 0f), new(0f, -2f), new(0f, 2f),
+                new(-1.5f, -1.5f), new(1.5f, -1.5f), new(-1.5f, 1.5f), new(1.5f, 1.5f)
+            };
+
+            foreach (var offset in glowOffsets)
+                drawList.AddText(textPos + offset, glowColor, text);
+        }
+
+        uint drawColor = ImGui.ColorConvertFloat4ToU32(textColor);
         drawList.AddText(textPos, drawColor, text);
         drawList.AddText(textPos + new Vector2(1f, 0f), drawColor, text);
 
@@ -500,6 +1215,15 @@ public class MainWindow : Window, IDisposable
             color.W);
     }
 
+    private static Vector4 Darken(Vector4 color, float amount)
+    {
+        return new Vector4(
+            Math.Clamp(color.X - amount, 0f, 1f),
+            Math.Clamp(color.Y - amount, 0f, 1f),
+            Math.Clamp(color.Z - amount, 0f, 1f),
+            color.W);
+    }
+
     private void DrawSortOption(string option)
     {
         bool selected = string.Equals(sortBy, option, StringComparison.OrdinalIgnoreCase);
@@ -512,20 +1236,44 @@ public class MainWindow : Window, IDisposable
 
     private List<HistoryEntry> GetSortedHistory()
     {
-        var history = Plugin.Configuration.GetOrCreateActiveProfile().History;
+        IEnumerable<HistoryEntry> history = GetCurrentHistory();
+
+        if (!string.IsNullOrWhiteSpace(searchInput))
+        {
+            string needle = searchInput.Trim();
+            history = history.Where(entry => HistoryEntryMatchesSearch(entry, needle));
+        }
 
         return sortBy switch
         {
             "Ascending" => history.OrderBy(x => ParseTimestamp(x.Timestamp)).ToList(),
             "Results" => history.OrderByDescending(x => ParseSignedFormatted(x.Result)).ToList(),
-            "Tips" => history.OrderByDescending(x => ParseBankValue(x.Tips)).ToList(),
+            "Tips" when IsDealerMode => history.OrderByDescending(x => ParseBankValue(x.Tips)).ToList(),
             _ => history.OrderByDescending(x => ParseTimestamp(x.Timestamp)).ToList(),
         };
     }
 
+    private bool HistoryEntryMatchesSearch(HistoryEntry entry, string searchText)
+    {
+        return ContainsInvariant(entry.House, searchText) ||
+               ContainsInvariant(entry.Timestamp, searchText) ||
+               ContainsInvariant(entry.StartingBank, searchText) ||
+               ContainsInvariant(entry.FinalBank, searchText) ||
+               ContainsInvariant(entry.Tips, searchText) ||
+               ContainsInvariant(entry.Result, searchText);
+    }
+
+    private static bool ContainsInvariant(string? source, string searchText)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+            return false;
+
+        return source.Contains(searchText, StringComparison.OrdinalIgnoreCase);
+    }
+
     private void UndoMostRecentHistory()
     {
-        var history = Plugin.Configuration.GetOrCreateActiveProfile().History;
+        var history = GetCurrentHistory();
         if (history.Count == 0)
             return;
 
@@ -537,13 +1285,10 @@ public class MainWindow : Window, IDisposable
         Plugin.Configuration.Save();
     }
 
+
     private void LoadFromConfiguration()
     {
         var profile = Plugin.Configuration.GetOrCreateActiveProfile();
-
-        startingBankInput = profile.StartingBankInput ?? string.Empty;
-        finalBankInput = profile.FinalBankInput ?? string.Empty;
-        tipsInput = profile.TipsInput ?? string.Empty;
 
         resultsLabel = string.IsNullOrWhiteSpace(Plugin.Configuration.ResultsLabel)
             ? "Today Profit/Loss:"
@@ -557,22 +1302,79 @@ public class MainWindow : Window, IDisposable
             ? "Final Bank:"
             : Plugin.Configuration.FinalLabel;
 
+        if (IsPlayerMode)
+        {
+            startingBankInput = profile.PlayerStartingBankInput ?? string.Empty;
+            finalBankInput = profile.PlayerCurrentBankInput ?? string.Empty;
+            betInput = profile.PlayerBetInput ?? string.Empty;
+            houseInput = profile.PlayerHouseInput ?? string.Empty;
+            trackedDealerInput = profile.PlayerTrackedDealerInput ?? string.Empty;
+            playerAutoTrackEnabled = profile.PlayerAutoTrackEnabled;
+            tipsInput = string.Empty;
+
+            startingBankValue = ParseBankValue(startingBankInput);
+            finalBankValue = ParseBankValue(finalBankInput);
+            betValue = ParseBankValue(betInput);
+            tipsValue = BigInteger.Zero;
+
+            if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(profile.PlayerCurrentBankInput))
+            {
+                finalBankValue = startingBankValue;
+            }
+
+            startingBankInput = FormatNumber(startingBankValue);
+            finalBankInput = FormatNumber(finalBankValue);
+            betInput = FormatNumber(betValue);
+            bankingInput = string.Empty;
+            bankingValue = BigInteger.Zero;
+            betInputHasUserEdited = ParseBankValue(profile.PlayerBetInput ?? string.Empty) > BigInteger.Zero;
+            bankingInputHasUserEdited = false;
+            return;
+        }
+
+        startingBankInput = profile.StartingBankInput ?? string.Empty;
+        finalBankInput = profile.FinalBankInput ?? string.Empty;
+        tipsInput = profile.TipsInput ?? string.Empty;
+        houseInput = profile.HouseInput ?? string.Empty;
+        betInput = string.Empty;
+        trackedDealerInput = profile.PlayerTrackedDealerInput ?? string.Empty;
+        playerAutoTrackEnabled = profile.PlayerAutoTrackEnabled;
+
         startingBankValue = ParseBankValue(startingBankInput);
         finalBankValue = ParseBankValue(finalBankInput);
         tipsValue = ParseBankValue(tipsInput);
+        betValue = BigInteger.Zero;
+        bankingValue = BigInteger.Zero;
 
         startingBankInput = FormatNumber(startingBankValue);
         finalBankInput = FormatNumber(finalBankValue);
         tipsInput = FormatNumber(tipsValue);
+        bankingInput = string.Empty;
+        betInputHasUserEdited = false;
+        bankingInputHasUserEdited = false;
     }
+
 
     private void SaveCurrentProfileValues()
     {
         var profile = Plugin.Configuration.GetOrCreateActiveProfile();
 
-        profile.StartingBankInput = startingBankInput;
-        profile.FinalBankInput = finalBankInput;
-        profile.TipsInput = tipsInput;
+        if (IsPlayerMode)
+        {
+            profile.PlayerStartingBankInput = startingBankInput;
+            profile.PlayerCurrentBankInput = finalBankInput;
+            profile.PlayerBetInput = betInput;
+            profile.PlayerHouseInput = houseInput;
+            profile.PlayerTrackedDealerInput = trackedDealerInput;
+            profile.PlayerAutoTrackEnabled = playerAutoTrackEnabled;
+        }
+        else
+        {
+            profile.StartingBankInput = startingBankInput;
+            profile.FinalBankInput = finalBankInput;
+            profile.TipsInput = tipsInput;
+            profile.HouseInput = houseInput;
+        }
 
         Plugin.Configuration.ResultsLabel = resultsLabel;
         Plugin.Configuration.StartingLabel = startingLabel;
@@ -581,18 +1383,47 @@ public class MainWindow : Window, IDisposable
         Plugin.Configuration.Save();
     }
 
+
     private void ClearCurrentInputs()
     {
         startingBankInput = string.Empty;
         finalBankInput = string.Empty;
-        tipsInput = string.Empty;
+        houseInput = string.Empty;
 
-        startingBankValue = BigInteger.Zero;
-        finalBankValue = BigInteger.Zero;
-        tipsValue = BigInteger.Zero;
+        if (IsPlayerMode)
+        {
+            betInput = string.Empty;
+            tipsInput = string.Empty;
+            bankingInput = string.Empty;
 
+            startingBankValue = BigInteger.Zero;
+            finalBankValue = BigInteger.Zero;
+            betValue = BigInteger.Zero;
+            tipsValue = BigInteger.Zero;
+            bankingValue = BigInteger.Zero;
+            betInputHasUserEdited = false;
+            bankingInputHasUserEdited = false;
+        }
+        else
+        {
+            tipsInput = string.Empty;
+            betInput = string.Empty;
+            bankingInput = string.Empty;
+
+            startingBankValue = BigInteger.Zero;
+            finalBankValue = BigInteger.Zero;
+            tipsValue = BigInteger.Zero;
+            betValue = BigInteger.Zero;
+            bankingValue = BigInteger.Zero;
+            betInputHasUserEdited = false;
+            bankingInputHasUserEdited = false;
+        }
+
+        currentBetDisplayOverrideUntilUtc = DateTime.MinValue;
+        currentBetDisplayOverrideText = string.Empty;
         SaveCurrentProfileValues();
     }
+
 
     private void CreateProfile()
     {
@@ -608,7 +1439,10 @@ public class MainWindow : Window, IDisposable
 
         SaveCurrentProfileValues();
 
-        Plugin.Configuration.Profiles.Add(new ProfileData { Name = trimmed });
+        var newProfile = new ProfileData { Name = trimmed };
+        newProfile.EnsureInitialized();
+
+        Plugin.Configuration.Profiles.Add(newProfile);
         Plugin.Configuration.ActiveProfileName = trimmed;
         Plugin.Configuration.Save();
 
@@ -634,21 +1468,414 @@ public class MainWindow : Window, IDisposable
 
     private void AddHistoryEntry()
     {
-        var profile = Plugin.Configuration.GetOrCreateActiveProfile();
+        var history = GetCurrentHistory();
 
-        profile.History.Add(new HistoryEntry
+        history.Add(new HistoryEntry
         {
+            House = houseInput.Trim(),
             Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
             StartingBank = FormatNumber(startingBankValue),
             FinalBank = FormatNumber(finalBankValue),
-            Tips = FormatNumber(tipsValue),
+            Tips = IsPlayerMode ? string.Empty : FormatNumber(tipsValue),
             Result = GetCurrentResultText()
         });
 
-        if (profile.History.Count > 200)
-            profile.History.RemoveAt(0);
+        if (history.Count > 200)
+            history.RemoveAt(0);
 
         Plugin.Configuration.Save();
+    }
+
+    private List<HistoryEntry> GetCurrentHistory()
+    {
+        var profile = Plugin.Configuration.GetOrCreateActiveProfile();
+        return IsPlayerMode ? profile.PlayerHistory : profile.DealerHistory;
+    }
+
+    private void SetMode(string mode)
+    {
+        bool switchingToPlayer = string.Equals(mode, "Player", StringComparison.OrdinalIgnoreCase);
+        bool alreadyInRequestedMode = switchingToPlayer ? IsPlayerMode : IsDealerMode;
+
+        if (alreadyInRequestedMode)
+            return;
+
+        SaveCurrentProfileValues();
+
+        Plugin.Configuration.ActiveMode = switchingToPlayer ? "Player" : "Dealer";
+        Plugin.Configuration.Save();
+
+        if (switchingToPlayer)
+            sortBy = sortBy == "Tips" ? "Most recent" : sortBy;
+
+        formulaHelpPinned = false;
+        hasPinnedTooltipPosition = false;
+
+        LoadFromConfiguration();
+    }
+
+    private void OnStartingBankCommitted()
+    {
+        if (!IsPlayerMode)
+            return;
+
+        finalBankValue = startingBankValue;
+        finalBankInput = FormatNumber(finalBankValue);
+    }
+
+
+    private void ApplyBetResult(bool isWin)
+    {
+        betValue = ParseBankValue(betInput);
+        betInput = FormatNumber(betValue);
+        betInputHasUserEdited = !string.IsNullOrWhiteSpace(betInput);
+
+        if (betValue <= BigInteger.Zero)
+        {
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+            finalBankValue = startingBankValue;
+
+        finalBankValue = isWin
+            ? finalBankValue + betValue
+            : BigInteger.Max(BigInteger.Zero, finalBankValue - betValue);
+
+        finalBankInput = FormatNumber(finalBankValue);
+        SaveCurrentProfileValues();
+    }
+
+    private void IncrementBankingValue(BigInteger amount)
+    {
+        bankingValue = ParseBankValue(bankingInput) + amount;
+        bankingInput = FormatNumber(bankingValue);
+        bankingInputHasUserEdited = true;
+    }
+
+    private void ApplyBankingAdjustment()
+    {
+        bankingValue = ParseBankValue(bankingInput);
+        bankingInput = FormatNumber(bankingValue);
+        bankingInputHasUserEdited = !string.IsNullOrWhiteSpace(bankingInput);
+
+        if (bankingValue <= BigInteger.Zero)
+        {
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+            finalBankValue = startingBankValue;
+
+        finalBankValue += bankingValue;
+        finalBankInput = FormatNumber(finalBankValue);
+
+        AddBankingHistoryEntry(bankingValue);
+
+        bankingInput = string.Empty;
+        bankingValue = BigInteger.Zero;
+        bankingInputHasUserEdited = false;
+        SaveCurrentProfileValues();
+    }
+
+    private void AddBankingHistoryEntry(BigInteger amount)
+    {
+        var history = GetCurrentHistory();
+
+        history.Add(new HistoryEntry
+        {
+            House = houseInput.Trim(),
+            Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            StartingBank = FormatNumber(startingBankValue),
+            FinalBank = FormatSignedResult(amount),
+            Tips = string.Empty,
+            Result = "+Banking"
+        });
+
+        if (history.Count > 200)
+            history.RemoveAt(0);
+
+        Plugin.Configuration.Save();
+    }
+
+
+
+    private void TrackDealerFromCurrentTarget()
+    {
+        var target = Plugin.TargetManager.Target;
+        string targetName = target?.Name.TextValue?.Trim() ?? string.Empty;
+
+        if (string.IsNullOrWhiteSpace(targetName))
+        {
+            trackDealerButtonDisabledUntilUtc = DateTime.UtcNow.AddSeconds(3);
+            return;
+        }
+
+        trackedDealerInput = StripWorldSuffix(targetName);
+        SaveCurrentProfileValues();
+    }
+
+    private void OnChatMessage(XivChatType type, int timestamp, ref SeString sender, ref SeString message, ref bool isHandled)
+    {
+        if (!IsAutoTrackingActive)
+            return;
+
+        if (type != XivChatType.Party && type != XivChatType.CrossParty)
+            return;
+
+        string trackedDealer = NormalizeLooseText(trackedDealerInput);
+        if (string.IsNullOrWhiteSpace(trackedDealer))
+            return;
+
+        string senderName = NormalizeLooseText(StripWorldSuffix(sender.TextValue ?? string.Empty));
+        if (!NamesRoughlyMatch(senderName, trackedDealer))
+            return;
+
+        string localPlayerName = NormalizeLooseText(Plugin.PlayerState.CharacterName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(localPlayerName))
+            return;
+
+        string messageText = message.TextValue?.Replace('\n', ' ').Replace('\r', ' ').Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(messageText))
+            return;
+
+        int winCount = 0;
+        int lossCount = 0;
+        int pushCount = 0;
+
+        foreach (Match match in TrackResultRegex.Matches(messageText))
+        {
+            string label = match.Groups["label"].Value;
+            string namesSection = match.Groups["names"].Value;
+            int matchCount = CountPlayerMentions(namesSection, localPlayerName);
+
+            if (matchCount <= 0)
+                continue;
+
+            if (LabelMatches(label, WinTrackLabels))
+            {
+                winCount += matchCount;
+                continue;
+            }
+
+            if (LabelMatches(label, LossTrackLabels))
+            {
+                lossCount += matchCount;
+                continue;
+            }
+
+            if (LabelMatches(label, PushTrackLabels))
+                pushCount += matchCount;
+        }
+
+        if (winCount == 0 && lossCount == 0 && pushCount == 0)
+            return;
+
+        ApplyTrackedChatOutcome(winCount, lossCount, pushCount);
+    }
+
+    private void ApplyTrackedChatOutcome(int winCount, int lossCount, int pushCount)
+    {
+        betValue = ParseBankValue(betInput);
+        betInput = FormatNumber(betValue);
+
+        if (betValue <= BigInteger.Zero)
+        {
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+            finalBankValue = startingBankValue;
+
+        BigInteger oldCurrentBankValue = finalBankValue;
+        int netCount = winCount - lossCount;
+        bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
+        bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
+        bool isPushed = isPurePush || isBalancedPush;
+
+        if (netCount > 0)
+            finalBankValue += betValue * netCount;
+        else if (netCount < 0)
+            finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - (betValue * BigInteger.Abs(netCount)));
+
+        finalBankInput = FormatNumber(finalBankValue);
+
+        if (isPushed)
+        {
+            AddTrackedHistoryEntry("Pushed");
+            SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+        AddTrackedHistoryEntry(FormatSignedResult(trackedResultValue));
+
+        if (trackedResultValue > BigInteger.Zero)
+            SetTemporaryCurrentBetDisplay("You won!", ProfitColor, 5);
+        else if (trackedResultValue < BigInteger.Zero)
+            SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
+
+        SaveCurrentProfileValues();
+    }
+
+    private void AddTrackedHistoryEntry(string resultText)
+    {
+        var history = GetCurrentHistory();
+
+        history.Add(new HistoryEntry
+        {
+            House = houseInput.Trim(),
+            Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            StartingBank = FormatNumber(startingBankValue),
+            FinalBank = FormatNumber(finalBankValue),
+            Tips = string.Empty,
+            Result = resultText
+        });
+
+        if (history.Count > 200)
+            history.RemoveAt(0);
+
+        Plugin.Configuration.Save();
+    }
+
+    private void SetTemporaryCurrentBetDisplay(string text, Vector4 color, int seconds)
+    {
+        currentBetDisplayOverrideText = text;
+        currentBetDisplayOverrideColor = color;
+        currentBetDisplayOverrideUntilUtc = DateTime.UtcNow.AddSeconds(seconds);
+    }
+
+    private void GetCurrentBetDisplay(out string? displayText, out Vector4? displayColor)
+    {
+        if (DateTime.UtcNow < currentBetDisplayOverrideUntilUtc && !string.IsNullOrWhiteSpace(currentBetDisplayOverrideText))
+        {
+            displayText = currentBetDisplayOverrideText;
+            displayColor = currentBetDisplayOverrideColor;
+            return;
+        }
+
+        displayText = null;
+        displayColor = null;
+    }
+
+    private static Regex BuildTrackResultRegex()
+    {
+        var labels = WinTrackLabels
+            .Concat(LossTrackLabels)
+            .Concat(PushTrackLabels)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderByDescending(x => x.Length)
+            .Select(Regex.Escape);
+
+        string labelPattern = string.Join("|", labels);
+        string pattern = $@"(?<label>{labelPattern})\s*:\s*(?<names>.*?)(?=(?:{labelPattern})\s*:|$)";
+
+        return new Regex(pattern, RegexOptions.IgnoreCase | RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    }
+
+    private static bool LabelMatches(string label, IEnumerable<string> labels)
+    {
+        return labels.Any(x => string.Equals(x, label, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static int CountPlayerMentions(string namesSection, string normalizedPlayerName)
+    {
+        if (string.IsNullOrWhiteSpace(namesSection) || string.IsNullOrWhiteSpace(normalizedPlayerName))
+            return 0;
+
+        string normalizedSection = NormalizeLooseText(namesSection);
+        if (string.IsNullOrWhiteSpace(normalizedSection))
+            return 0;
+
+        int count = 0;
+        int index = 0;
+
+        while (true)
+        {
+            index = normalizedSection.IndexOf(normalizedPlayerName, index, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+                break;
+
+            bool validLeft = index == 0 || normalizedSection[index - 1] == ' ';
+            int endIndex = index + normalizedPlayerName.Length;
+            bool validRight = endIndex >= normalizedSection.Length || normalizedSection[endIndex] == ' ';
+
+            if (validLeft && validRight)
+                count++;
+
+            index = endIndex;
+        }
+
+        return count;
+    }
+
+    private void GetTrackingStatusDisplay(out string statusText, out Vector4 statusColor)
+    {
+        if (IsAutoTrackingActive)
+        {
+            statusText = "ON";
+            statusColor = ProfitColor;
+            return;
+        }
+
+        statusText = "OFF";
+        statusColor = LossColor;
+    }
+
+
+    private static bool NamesRoughlyMatch(string left, string right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+            return false;
+
+        return string.Equals(left, right, StringComparison.OrdinalIgnoreCase) ||
+               left.Contains(right, StringComparison.OrdinalIgnoreCase) ||
+               right.Contains(left, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizeLooseText(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return string.Empty;
+
+        var builder = new StringBuilder(input.Length);
+        bool previousWasSpace = false;
+
+        foreach (char c in StripWorldSuffix(input))
+        {
+            if (char.IsLetterOrDigit(c) || c == '\'' || c == '-')
+            {
+                builder.Append(c);
+                previousWasSpace = false;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(c) || c == ',' || c == '.' || c == ':' || c == ';' || c == '|' || c == '/')
+            {
+                if (!previousWasSpace)
+                {
+                    builder.Append(' ');
+                    previousWasSpace = true;
+                }
+            }
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    private static string FormatSignedResult(BigInteger value)
+    {
+        if (value > BigInteger.Zero)
+            return $"+{FormatNumber(value)}";
+
+        if (value < BigInteger.Zero)
+            return $"-{FormatNumber(BigInteger.Abs(value))}";
+
+        return "0";
     }
 
     private string BuildFinalMessage()
@@ -662,7 +1889,9 @@ public class MainWindow : Window, IDisposable
 
     private string GetCurrentResultText()
     {
-        var value = finalBankValue - startingBankValue - tipsValue;
+        var value = IsPlayerMode
+            ? finalBankValue - startingBankValue
+            : finalBankValue - startingBankValue - tipsValue;
 
         if (value > BigInteger.Zero)
             return $"+ {FormatNumber(value)}";
@@ -673,23 +1902,26 @@ public class MainWindow : Window, IDisposable
         return "0";
     }
 
-    private static void SplitTimestamp(string timestamp, out string datePart, out string timePart)
+    private void AlignTopRightControls(float totalWidth)
     {
-        if (DateTime.TryParseExact(
-                timestamp,
-                "yyyy-MM-dd HH:mm:ss",
-                CultureInfo.InvariantCulture,
-                DateTimeStyles.None,
-                out var parsed))
-        {
-            datePart = parsed.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            timePart = parsed.ToString("HH:mm:ss", CultureInfo.InvariantCulture);
+        float available = ImGui.GetContentRegionAvail().X;
+        if (available <= totalWidth)
             return;
-        }
 
-        var split = timestamp.Split(' ');
-        datePart = split.Length > 0 ? split[0] : string.Empty;
-        timePart = split.Length > 1 ? split[1] : string.Empty;
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (available - totalWidth));
+    }
+
+    private static string StripWorldSuffix(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return string.Empty;
+
+        string trimmed = input.Trim();
+        int atIndex = trimmed.IndexOf('@');
+        if (atIndex >= 0)
+            trimmed = trimmed[..atIndex];
+
+        return trimmed.Trim();
     }
 
     private static DateTime ParseTimestamp(string timestamp)
@@ -770,6 +2002,12 @@ public class MainWindow : Window, IDisposable
         }
 
         return builder.ToString();
+    }
+
+    private static Vector4 HexWithAlpha(string hex, float alpha)
+    {
+        var color = Hex(hex);
+        return new Vector4(color.X, color.Y, color.Z, Math.Clamp(alpha, 0f, 1f));
     }
 
     private static Vector4 Hex(string hex)

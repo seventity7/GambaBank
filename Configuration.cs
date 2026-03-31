@@ -21,6 +21,7 @@ public class Configuration : IPluginConfiguration
     public bool IncludeTimestampInMessage { get; set; } = true;
     public string SelectedTheme { get; set; } = "Default";
     public string ActiveProfileName { get; set; } = "Default";
+    public string ActiveMode { get; set; } = "Dealer";
 
     public List<ProfileData> Profiles { get; set; } = new();
 
@@ -41,9 +42,22 @@ public class Configuration : IPluginConfiguration
             ActiveProfileName = "Default";
         }
 
+        if (!string.Equals(ActiveMode, "Dealer", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(ActiveMode, "Player", StringComparison.OrdinalIgnoreCase))
+        {
+            ActiveMode = "Dealer";
+        }
+
+        foreach (var profile in Profiles)
+        {
+            profile.EnsureInitialized();
+        }
+
         if (GetActiveProfile() == null)
         {
-            Profiles.Add(new ProfileData { Name = ActiveProfileName });
+            var profile = new ProfileData { Name = ActiveProfileName };
+            profile.EnsureInitialized();
+            Profiles.Add(profile);
         }
     }
 
@@ -62,9 +76,13 @@ public class Configuration : IPluginConfiguration
     {
         var profile = GetActiveProfile();
         if (profile != null)
+        {
+            profile.EnsureInitialized();
             return profile;
+        }
 
         profile = new ProfileData { Name = string.IsNullOrWhiteSpace(ActiveProfileName) ? "Default" : ActiveProfileName };
+        profile.EnsureInitialized();
         Profiles.Add(profile);
         return profile;
     }
@@ -79,17 +97,47 @@ public class Configuration : IPluginConfiguration
 public class ProfileData
 {
     public string Name { get; set; } = "Default";
+
+    // Dealer mode inputs
     public string StartingBankInput { get; set; } = string.Empty;
     public string FinalBankInput { get; set; } = string.Empty;
     public string TipsInput { get; set; } = string.Empty;
-    public string GoalInput { get; set; } = string.Empty;
+    public string HouseInput { get; set; } = string.Empty;
 
+    // Legacy / compatibility
+    public string GoalInput { get; set; } = string.Empty;
     public List<HistoryEntry> History { get; set; } = new();
+
+    // Player mode inputs
+    public string PlayerStartingBankInput { get; set; } = string.Empty;
+    public string PlayerCurrentBankInput { get; set; } = string.Empty;
+    public string PlayerBetInput { get; set; } = string.Empty;
+    public string PlayerHouseInput { get; set; } = string.Empty;
+    public string PlayerTrackedDealerInput { get; set; } = string.Empty;
+    public bool PlayerAutoTrackEnabled { get; set; } = false;
+
+    // Mode-specific history
+    public List<HistoryEntry> DealerHistory { get; set; } = new();
+    public List<HistoryEntry> PlayerHistory { get; set; } = new();
+
+    public void EnsureInitialized()
+    {
+        if (DealerHistory.Count == 0 && History.Count > 0)
+        {
+            DealerHistory.AddRange(History);
+        }
+
+        if (string.IsNullOrWhiteSpace(PlayerCurrentBankInput) && !string.IsNullOrWhiteSpace(PlayerStartingBankInput))
+        {
+            PlayerCurrentBankInput = PlayerStartingBankInput;
+        }
+    }
 }
 
 [Serializable]
 public class HistoryEntry
 {
+    public string House { get; set; } = string.Empty;
     public string Timestamp { get; set; } = string.Empty;
     public string StartingBank { get; set; } = string.Empty;
     public string FinalBank { get; set; } = string.Empty;
