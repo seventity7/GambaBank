@@ -44,6 +44,8 @@ public class MainWindow : Window, IDisposable
     private bool hasPinnedTooltipPosition;
 
     private bool playerAutoTrackEnabled;
+    private int natbjMultiplierIndex;
+    private int dirtytbjMultiplierIndex;
     private DateTime trackDealerButtonDisabledUntilUtc = DateTime.MinValue;
     private DateTime currentBetDisplayOverrideUntilUtc = DateTime.MinValue;
     private string currentBetDisplayOverrideText = string.Empty;
@@ -55,6 +57,8 @@ public class MainWindow : Window, IDisposable
     private static readonly string[] PushTrackLabels = { "Push", "Pushed" };
 
     private static readonly Regex TrackResultRegex = BuildTrackResultRegex();
+    private static readonly string[] BlackjackMultiplierLabels = { "1.0x", "1.3x", "1.7x", "1.5x", "2.0x", "2.5x", "3.0x" };
+    private static readonly int[] BlackjackMultiplierTenths = { 10, 13, 17, 15, 20, 25, 30 };
 
     private static readonly Vector2 DefaultWindowSize = new(1080f, 520f);
     private static readonly Vector2 MinimumWindowSize = new(980f, 470f);
@@ -63,6 +67,7 @@ public class MainWindow : Window, IDisposable
     private static readonly Vector4 LossColor = new(1.0f, 0.45f, 0.45f, 1.0f);
     private static readonly Vector4 NeutralColor = new(1.0f, 1.0f, 1.0f, 1.0f);
     private static readonly Vector4 GoldColor = new(0.95f, 0.80f, 0.25f, 1.0f);
+    private static readonly Vector4 BlackjackColor = Hex("#00c0c7");
     private static readonly Vector4 BlackText = new(0.0f, 0.0f, 0.0f, 1.0f);
 
     private static readonly Vector4 CopyButtonColor = Hex("#005210");
@@ -75,6 +80,8 @@ public class MainWindow : Window, IDisposable
     private static readonly Vector4 WinButtonColor = Hex("#098500");
     private static readonly Vector4 LossButtonColor = Hex("#852100");
     private static readonly Vector4 AutoTrackButtonColor = Hex("#ff7700");
+    private static readonly Vector4 AutoTrackGradientStartColor = LossButtonColor;
+    private static readonly Vector4 AutoTrackGradientEndColor = WinButtonColor;
 
     private static readonly Vector4 HelpButtonColor = Hex("#2C2C2C");
     private static readonly Vector4 HelpButtonHoverColor = Hex("#3A3A3A");
@@ -174,13 +181,32 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton("Delete Current", "DeleteCurrentButton", new Vector2(120f, 0f), DangerButtonColor) && Plugin.Configuration.Profiles.Count > 1)
             DeleteCurrentProfile();
 
-        ImGui.SameLine();
-        AlignTopRightControls(70f + 70f + 22f + (ImGui.GetStyle().ItemSpacing.X * 2f));
+        const float topHelpButtonWidth = 58f;
+        const float topModeButtonWidth = 70f;
+        const float topQuestionButtonWidth = 22f;
+        const float dividerVisualWidth = 8f;
 
+        ImGui.SameLine();
+        AlignTopRightControls(
+            topHelpButtonWidth +
+            dividerVisualWidth +
+            topModeButtonWidth +
+            topModeButtonWidth +
+            topQuestionButtonWidth +
+            (ImGui.GetStyle().ItemSpacing.X * 4f));
+
+        if (DrawStyledBoldButton("Help", "OpenHelpWindowButton", new Vector2(topHelpButtonWidth, 20f), Hex("#2aa163"), WhiteText))
+            Plugin.OpenHelpUi();
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("|");
+
+        ImGui.SameLine();
         if (DrawStyledBoldButton(
                 "Dealer",
                 "DealerModeButton",
-                new Vector2(70f, 20f),
+                new Vector2(topModeButtonWidth, 20f),
                 IsDealerMode ? DealerButtonColor : Darken(DealerButtonColor, 0.20f),
                 WhiteText,
                 pulsatingGlow: IsDealerMode))
@@ -192,7 +218,7 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton(
                 "Player",
                 "PlayerModeButton",
-                new Vector2(70f, 20f),
+                new Vector2(topModeButtonWidth, 20f),
                 IsPlayerMode ? PlayerButtonColor : Darken(PlayerButtonColor, 0.20f),
                 WhiteText,
                 pulsatingGlow: IsPlayerMode))
@@ -280,11 +306,13 @@ public class MainWindow : Window, IDisposable
         DrawSectionTitle("☆ Bank Tracking");
         ImGui.Dummy(new Vector2(0f, 2f));
 
-        if (ImGui.BeginTable("##PlayerTopBankFieldsTable", 3, ImGuiTableFlags.SizingFixedFit))
+        if (ImGui.BeginTable("##PlayerTopBankFieldsTable", 5, ImGuiTableFlags.SizingFixedFit))
         {
             ImGui.TableSetupColumn("PlayerLeftColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
             ImGui.TableSetupColumn("PlayerCenterColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
             ImGui.TableSetupColumn("PlayerActionColumn", ImGuiTableColumnFlags.WidthFixed, 96f);
+            ImGui.TableSetupColumn("PlayerTopSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, 14f);
+            ImGui.TableSetupColumn("PlayerAddBankColumn", ImGuiTableColumnFlags.WidthFixed, 218f);
 
             ImGui.TableNextRow();
 
@@ -296,6 +324,12 @@ public class MainWindow : Window, IDisposable
 
             ImGui.TableSetColumnIndex(2);
             DrawPlayerActionButtons();
+
+            ImGui.TableSetColumnIndex(3);
+            DrawTallVerticalSeparator((ImGui.GetFrameHeight() * 2f) + ImGui.GetStyle().ItemSpacing.Y);
+
+            ImGui.TableSetColumnIndex(4);
+            DrawPlayerAddBankControls();
 
             ImGui.EndTable();
         }
@@ -381,19 +415,85 @@ public class MainWindow : Window, IDisposable
 
 
 
+
+
+    private void DrawPlayerAddBankControls()
+    {
+        const float bankingFieldWidth = 168f;
+        const float quickAddButtonWidth = 42f;
+
+        string? bankingDisplayText = null;
+        Vector4? bankingDisplayColor = null;
+        bool bankingIsZero = bankingValue == BigInteger.Zero && ParseBankValue(bankingInput) == BigInteger.Zero;
+        if (bankingIsZero)
+        {
+            bankingDisplayText = "0";
+            bankingDisplayColor = LossColor;
+        }
+
+        if (!ImGui.BeginTable("##PlayerAddBankControlsTable", 2, ImGuiTableFlags.SizingFixedFit))
+            return;
+
+        ImGui.TableSetupColumn("PlayerAddBankValueColumn", ImGuiTableColumnFlags.WidthFixed, bankingFieldWidth);
+        ImGui.TableSetupColumn("PlayerAddBankQuickColumn", ImGuiTableColumnFlags.WidthFixed, quickAddButtonWidth);
+
+        ImGui.TableNextRow();
+
+        ImGui.TableSetColumnIndex(0);
+        DrawCenteredNumericInputField(
+            "##BankingValue",
+            ref bankingInput,
+            ref bankingValue,
+            bankingFieldWidth,
+            ref bankingInputHasUserEdited,
+            true,
+            null,
+            bankingDisplayText,
+            bankingDisplayColor,
+            0f,
+            true,
+            true);
+
+        ImGui.TableSetColumnIndex(1);
+        if (DrawStyledBoldButton("+1M", "AddBanking1MTopButton", new Vector2(quickAddButtonWidth, 0f), Hex("#741a53"), WhiteText))
+            IncrementBankingValue(1_000_000);
+
+        ImGui.TableNextRow();
+        ImGui.TableSetColumnIndex(0);
+        if (DrawStyledBoldButton("Add Bank", "ApplyBankingButton", new Vector2(bankingFieldWidth, 0f), CopyButtonColor, WhiteText))
+            ApplyBankingAdjustment();
+
+        ImGui.TableSetColumnIndex(1);
+        ImGui.Dummy(Vector2.Zero);
+
+        ImGui.EndTable();
+    }
+
+    private void DrawTallVerticalSeparator(float height)
+    {
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float x = start.X + 6f;
+        uint separatorColor = ImGui.GetColorU32(ImGuiCol.Separator);
+        ImGui.GetWindowDrawList().AddLine(
+            new Vector2(x, start.Y),
+            new Vector2(x, start.Y + height),
+            separatorColor,
+            1f);
+        ImGui.Dummy(new Vector2(12f, height));
+    }
+
 private void DrawPlayerTrackingLayout()
 {
     const float labelWidth = 96f;
     const float betFieldWidth = 140f;
     const float middleSpacerWidth = 16f;
-    const float dealerBlockWidth = 145f;
+    const float clonedBlockWidth = 145f;
     const float separatorColumnWidth = 14f;
-    const float bankingFieldWidth = 168f;
+    const float dealerBlockWidth = 145f;
 
     float spacing = ImGui.GetStyle().ItemSpacing.X;
-    float winLossButtonWidth = (betFieldWidth - spacing) * 0.5f;
-    float bankingThreeButtonWidth = (bankingFieldWidth - (spacing * 2f)) / 3f;
-    float bankingTwoButtonWidth = (bankingFieldWidth - spacing) * 0.5f;
+    float originalButtonWidth = (betFieldWidth - spacing) * 0.5f;
+    float clonedButtonWidth = (clonedBlockWidth - spacing) * 0.5f;
 
     GetTrackingStatusDisplay(out var statusText, out var statusColor);
     GetCurrentBetDisplay(out var currentBetOverrideText, out var currentBetOverrideColor);
@@ -421,24 +521,15 @@ private void DrawPlayerTrackingLayout()
         currentBetDisplayColor = currentBetOverrideColor;
     }
 
-    string? bankingDisplayText = null;
-    Vector4? bankingDisplayColor = null;
-    bool bankingIsZero = bankingValue == BigInteger.Zero && ParseBankValue(bankingInput) == BigInteger.Zero;
-    if (bankingIsZero)
-    {
-        bankingDisplayText = "0";
-        bankingDisplayColor = LossColor;
-    }
-
     if (!ImGui.BeginTable("##PlayerTrackingUnifiedLayout", 6, ImGuiTableFlags.SizingFixedFit))
         return;
 
     ImGui.TableSetupColumn("TrackingLabelColumn", ImGuiTableColumnFlags.WidthFixed, labelWidth);
-    ImGui.TableSetupColumn("TrackingLeftControlsColumn", ImGuiTableColumnFlags.WidthFixed, betFieldWidth);
-    ImGui.TableSetupColumn("TrackingMiddleSpacerColumn", ImGuiTableColumnFlags.WidthFixed, middleSpacerWidth);
-    ImGui.TableSetupColumn("TrackingDealerColumn", ImGuiTableColumnFlags.WidthFixed, dealerBlockWidth);
+    ImGui.TableSetupColumn("TrackingOriginalColumn", ImGuiTableColumnFlags.WidthFixed, betFieldWidth);
+    ImGui.TableSetupColumn("TrackingSpacerColumn", ImGuiTableColumnFlags.WidthFixed, middleSpacerWidth);
+    ImGui.TableSetupColumn("TrackingCloneColumn", ImGuiTableColumnFlags.WidthFixed, clonedBlockWidth);
     ImGui.TableSetupColumn("TrackingSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, separatorColumnWidth);
-    ImGui.TableSetupColumn("TrackingBankingColumn", ImGuiTableColumnFlags.WidthFixed, bankingFieldWidth);
+    ImGui.TableSetupColumn("TrackingDealerColumn", ImGuiTableColumnFlags.WidthFixed, dealerBlockWidth);
 
     // Row 1
     ImGui.TableNextRow();
@@ -460,7 +551,40 @@ private void DrawPlayerTrackingLayout()
     ImGui.TableSetColumnIndex(2);
     ImGui.Dummy(Vector2.Zero);
 
+    string? clonedBetDisplayText;
+    Vector4? clonedBetDisplayColor;
+
+    BigInteger clonedBetValue = ParseBankValue(betInput);
+    if (clonedBetValue > BigInteger.Zero)
+    {
+        clonedBetDisplayText = FormatNumber(clonedBetValue);
+        clonedBetDisplayColor = NeutralColor;
+    }
+    else
+    {
+        clonedBetDisplayText = "Set Current Bet";
+        clonedBetDisplayColor = LossColor;
+    }
+
     ImGui.TableSetColumnIndex(3);
+    DrawCenteredNumericInputField(
+        "##ClonedBetValue",
+        ref betInput,
+        ref betValue,
+        clonedBlockWidth,
+        ref betInputHasUserEdited,
+        false,
+        null,
+        clonedBetDisplayText,
+        clonedBetDisplayColor,
+        0f,
+        false,
+        false);
+
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+
+    ImGui.TableSetColumnIndex(5);
     ImGui.SetNextItemWidth(dealerBlockWidth);
     bool confirmedByEnter = ImGui.InputText("##TrackedDealerInput", ref trackedDealerInput, 128, ImGuiInputTextFlags.EnterReturnsTrue);
     bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
@@ -471,24 +595,6 @@ private void DrawPlayerTrackingLayout()
         SaveCurrentProfileValues();
     }
 
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-
-    ImGui.TableSetColumnIndex(5);
-    DrawCenteredNumericInputField(
-        "##BankingValue",
-        ref bankingInput,
-        ref bankingValue,
-        bankingFieldWidth,
-        ref bankingInputHasUserEdited,
-        true,
-        null,
-        bankingDisplayText,
-        bankingDisplayColor,
-        0f,
-        true,
-        true);
-
     // Row 2
     ImGui.TableNextRow();
 
@@ -496,20 +602,30 @@ private void DrawPlayerTrackingLayout()
     ImGui.AlignTextToFramePadding();
     ImGui.TextUnformatted("Tracking:");
     ImGui.SameLine(0f, 2f);
+    ImGui.AlignTextToFramePadding();
     DrawBoldColoredText(statusText, statusColor);
 
     ImGui.TableSetColumnIndex(1);
-    if (DrawStyledBoldButton("WIN ↑", "WinBetButton", new Vector2(winLossButtonWidth, 0f), WinButtonColor, WhiteText))
+    if (DrawStyledBoldButton("WIN ↑", "WinBetButton", new Vector2(originalButtonWidth, 0f), WinButtonColor, WhiteText))
         ApplyBetResult(true);
 
     ImGui.SameLine();
-    if (DrawStyledBoldButton("↓ LOSS", "LossBetButton", new Vector2(winLossButtonWidth, 0f), LossButtonColor, WhiteText))
+    if (DrawStyledBoldButton("↓ LOSS", "LossBetButton", new Vector2(originalButtonWidth, 0f), LossButtonColor, WhiteText))
         ApplyBetResult(false);
 
     ImGui.TableSetColumnIndex(2);
     ImGui.Dummy(Vector2.Zero);
 
     ImGui.TableSetColumnIndex(3);
+    DrawMultiplierDropdownButton("Natbj", ref natbjMultiplierIndex, new Vector2(clonedButtonWidth, 0f), WinButtonColor);
+
+    ImGui.SameLine();
+    DrawMultiplierDropdownButton("Dirtytbj", ref dirtytbjMultiplierIndex, new Vector2(clonedButtonWidth, 0f), LossButtonColor);
+
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+
+    ImGui.TableSetColumnIndex(5);
     if (IsTrackDealerButtonDisabled)
         ImGui.BeginDisabled();
 
@@ -525,22 +641,24 @@ private void DrawPlayerTrackingLayout()
     if (IsTrackDealerButtonDisabled)
         ImGui.EndDisabled();
 
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-
-    ImGui.TableSetColumnIndex(5);
-    if (DrawStyledBoldButton("Add Bank", "ApplyBankingButton", new Vector2(bankingFieldWidth, 0f), CopyButtonColor, WhiteText))
-        ApplyBankingAdjustment();
-
     // Row 3
     ImGui.TableNextRow();
 
     ImGui.TableSetColumnIndex(0);
     ImGui.Dummy(Vector2.Zero);
 
-    ImGui.TableSetColumnIndex(1);
     string autoTrackText = playerAutoTrackEnabled ? "● Auto Track" : "○ Auto Track";
-    if (DrawStyledBoldButton(autoTrackText, "AutoTrackButton", new Vector2(betFieldWidth, 0f), AutoTrackButtonColor, WhiteText))
+    ImGui.TableSetColumnIndex(1);
+    if (DrawGradientStyledBoldButton(
+            autoTrackText,
+            "AutoTrackButton",
+            new Vector2(betFieldWidth, 0f),
+            AutoTrackGradientStartColor,
+            AutoTrackGradientEndColor,
+            65f,
+            0.74f,
+            0.02f,
+            WhiteText))
     {
         playerAutoTrackEnabled = !playerAutoTrackEnabled;
         SaveCurrentProfileValues();
@@ -550,49 +668,152 @@ private void DrawPlayerTrackingLayout()
     ImGui.Dummy(Vector2.Zero);
 
     ImGui.TableSetColumnIndex(3);
+    if (DrawStyledBoldButton("NAT BJ", "NatBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#292f56"), WhiteText))
+        ApplyBlackjackResult(natbjMultiplierIndex);
+
+    ImGui.SameLine();
+    if (DrawStyledBoldButton("DIRTY BJ", "DirtyBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#741a53"), WhiteText))
+        ApplyBlackjackResult(dirtytbjMultiplierIndex);
+
+    ImGui.TableSetColumnIndex(4);
+    DrawMiniVerticalSeparator();
+
+    ImGui.TableSetColumnIndex(5);
     if (DrawStyledBoldButton("Clear", "ClearTrackedDealerButton", new Vector2(dealerBlockWidth, 0f), LossButtonColor, WhiteText))
     {
         trackedDealerInput = string.Empty;
         SaveCurrentProfileValues();
     }
 
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-
-    ImGui.TableSetColumnIndex(5);
-    if (DrawStyledBoldButton("+50K", "AddBanking50KButton", new Vector2(bankingThreeButtonWidth, 0f), HexWithAlpha("#852100", 0.60f), WhiteText))
-        IncrementBankingValue(50_000);
-
-    ImGui.SameLine();
-    if (DrawStyledBoldButton("+100K", "AddBanking100KButton", new Vector2(bankingThreeButtonWidth, 0f), HexWithAlpha("#950e44", 0.70f), WhiteText))
-        IncrementBankingValue(100_000);
-
-    ImGui.SameLine();
-    if (DrawStyledBoldButton("+250K", "AddBanking250KButton", new Vector2(bankingThreeButtonWidth, 0f), HexWithAlpha("#82327a", 0.80f), WhiteText))
-        IncrementBankingValue(250_000);
-
-    // Row 4
-    ImGui.TableNextRow();
-
-    ImGui.TableSetColumnIndex(0);
-    ImGui.Dummy(Vector2.Zero);
-    ImGui.TableSetColumnIndex(1);
-    ImGui.Dummy(Vector2.Zero);
-    ImGui.TableSetColumnIndex(2);
-    ImGui.Dummy(Vector2.Zero);
-    ImGui.TableSetColumnIndex(3);
-    ImGui.Dummy(Vector2.Zero);
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-    ImGui.TableSetColumnIndex(5);
-    if (DrawStyledBoldButton("+500K", "AddBanking500KButton", new Vector2(bankingTwoButtonWidth, 0f), HexWithAlpha("#525198", 0.90f), WhiteText))
-        IncrementBankingValue(500_000);
-
-    ImGui.SameLine();
-    if (DrawStyledBoldButton("+1M", "AddBanking1MButton", new Vector2(bankingTwoButtonWidth, 0f), HexWithAlpha("#006496", 1.00f), WhiteText))
-        IncrementBankingValue(1_000_000);
-
     ImGui.EndTable();
+}
+
+
+private void DrawMultiplierDropdownButton(string internalName, ref int selectedIndex, Vector2 size, Vector4 buttonColor)
+{
+    selectedIndex = Math.Clamp(selectedIndex, 0, BlackjackMultiplierLabels.Length - 1);
+    string visibleText = BlackjackMultiplierLabels[selectedIndex];
+
+    Vector2 actualSize = size;
+    if (actualSize.X <= 0f)
+        actualSize.X = 120f;
+    if (actualSize.Y <= 0f)
+        actualSize.Y = ImGui.GetFrameHeight();
+
+    bool pressed = ImGui.InvisibleButton($"##{internalName}", actualSize);
+    bool hovered = ImGui.IsItemHovered();
+    bool held = ImGui.IsItemActive();
+
+    Vector2 min = ImGui.GetItemRectMin();
+    Vector2 max = ImGui.GetItemRectMax();
+    var drawList = ImGui.GetWindowDrawList();
+    var style = ImGui.GetStyle();
+
+    uint frameColor = ImGui.GetColorU32(held ? ImGuiCol.FrameBgActive : hovered ? ImGuiCol.FrameBgHovered : ImGuiCol.FrameBg);
+    uint borderColor = ImGui.GetColorU32(ImGuiCol.Border);
+    uint textColor = ImGui.GetColorU32(ImGuiCol.Text);
+
+    drawList.AddRectFilled(min, max, frameColor, style.FrameRounding);
+    drawList.AddRect(min, max, borderColor, style.FrameRounding, ImDrawFlags.None, 1f);
+
+    float arrowRegionWidth = ImGui.GetFrameHeight();
+    float arrowSeparatorX = max.X - arrowRegionWidth;
+    drawList.AddLine(new Vector2(arrowSeparatorX, min.Y), new Vector2(arrowSeparatorX, max.Y), borderColor, 1f);
+
+    Vector2 textSize = ImGui.CalcTextSize(visibleText);
+    float textRegionWidth = arrowSeparatorX - min.X;
+    Vector2 textPos = new(
+        min.X + ((textRegionWidth - textSize.X) * 0.5f),
+        min.Y + ((max.Y - min.Y) - textSize.Y) * 0.5f);
+    drawList.AddText(textPos, textColor, visibleText);
+
+    Vector2 arrowCenter = new((arrowSeparatorX + max.X) * 0.5f, (min.Y + max.Y) * 0.5f + 1f);
+    drawList.AddTriangleFilled(
+        new Vector2(arrowCenter.X - 4f, arrowCenter.Y - 2f),
+        new Vector2(arrowCenter.X + 4f, arrowCenter.Y - 2f),
+        new Vector2(arrowCenter.X, arrowCenter.Y + 3f),
+        textColor);
+
+    if (pressed)
+        ImGui.OpenPopup($"##{internalName}Popup");
+
+    float popupHeight = (BlackjackMultiplierLabels.Length * (ImGui.GetFrameHeight() + style.ItemSpacing.Y)) + (style.WindowPadding.Y * 2f);
+    ImGui.SetNextWindowPos(new Vector2(min.X, min.Y - popupHeight - 2f), ImGuiCond.Appearing);
+
+    if (ImGui.BeginPopup($"##{internalName}Popup"))
+    {
+        for (int i = BlackjackMultiplierLabels.Length - 1; i >= 0; i--)
+        {
+            bool isSelected = selectedIndex == i;
+            if (ImGui.Selectable(BlackjackMultiplierLabels[i], isSelected))
+            {
+                selectedIndex = i;
+                ImGui.CloseCurrentPopup();
+                SaveCurrentProfileValues();
+            }
+
+            if (isSelected)
+                ImGui.SetItemDefaultFocus();
+        }
+
+        ImGui.EndPopup();
+    }
+}
+
+private void ApplyBlackjackResult(int multiplierIndex)
+{
+    multiplierIndex = Math.Clamp(multiplierIndex, 0, BlackjackMultiplierTenths.Length - 1);
+
+    betValue = ParseBankValue(betInput);
+    betInput = FormatNumber(betValue);
+    betInputHasUserEdited = !string.IsNullOrWhiteSpace(betInput);
+
+    if (betValue <= BigInteger.Zero)
+    {
+        SaveCurrentProfileValues();
+        return;
+    }
+
+    if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+        finalBankValue = startingBankValue;
+
+    BigInteger payout = (betValue * BlackjackMultiplierTenths[multiplierIndex]) / 10;
+    finalBankValue += payout;
+    finalBankInput = FormatNumber(finalBankValue);
+
+    RemoveMostRecentHistoryEntry();
+    AddBlackjackHistoryEntry(payout);
+
+    SaveCurrentProfileValues();
+}
+
+private void RemoveMostRecentHistoryEntry()
+{
+    var history = GetCurrentHistory();
+    if (history.Count == 0)
+        return;
+
+    history.RemoveAt(history.Count - 1);
+}
+
+private void AddBlackjackHistoryEntry(BigInteger payout)
+{
+    var history = GetCurrentHistory();
+
+    history.Add(new HistoryEntry
+    {
+        House = houseInput.Trim(),
+        Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+        StartingBank = FormatNumber(startingBankValue),
+        FinalBank = FormatNumber(finalBankValue),
+        Tips = string.Empty,
+        Result = $"+{FormatNumber(payout)} Blackjack"
+    });
+
+    if (history.Count > 200)
+        history.RemoveAt(0);
+
+    Plugin.Configuration.Save();
 }
 
 private void DrawMiniVerticalSeparator()
@@ -656,6 +877,9 @@ private void DrawMessageSection()
             DrawSortOption("Most recent");
             DrawSortOption("Ascending");
             DrawSortOption("Results");
+
+            if (IsPlayerMode)
+                DrawSortOption("Blackjack");
 
             if (IsDealerMode)
                 DrawSortOption("Tips");
@@ -741,8 +965,15 @@ private void DrawMessageSection()
                 ImGui.TableSetColumnIndex(4);
             }
 
-            var resultColor = ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
-            DrawColoredCell(entry.Result, resultColor);
+            bool isBlackjackResult = entry.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase);
+            var resultColor = isBlackjackResult
+                ? BlackjackColor
+                : ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
+
+            if (isBlackjackResult)
+                DrawBoldColoredCell(entry.Result, resultColor);
+            else
+                DrawColoredCell(entry.Result, resultColor);
         }
 
         ImGui.EndTable();
@@ -1090,6 +1321,19 @@ private void DrawMessageSection()
         ImGui.PopStyleColor();
     }
 
+    private void DrawBoldColoredCell(string text, Vector4 color)
+    {
+        Vector2 pos = ImGui.GetCursorScreenPos();
+        uint col = ImGui.ColorConvertFloat4ToU32(color);
+        var drawList = ImGui.GetWindowDrawList();
+
+        drawList.AddText(pos, col, text);
+        drawList.AddText(pos + new Vector2(1f, 0f), col, text);
+
+        Vector2 size = ImGui.CalcTextSize(text);
+        ImGui.Dummy(new Vector2(size.X + 1f, size.Y));
+    }
+
     private void DrawProfitsLossesSummary()
     {
         var history = GetCurrentHistory();
@@ -1206,6 +1450,194 @@ private void DrawMessageSection()
         return pressed;
     }
 
+
+    private bool DrawGradientStyledBoldButton(
+        string text,
+        string id,
+        Vector2 size,
+        Vector4 startColor,
+        Vector4 endColor,
+        float angleDegrees,
+        float startPercent,
+        float endPercent,
+        Vector4? textColorOverride = null)
+    {
+        Vector2 actualSize = size;
+        if (actualSize.X <= 0f)
+            actualSize.X = ImGui.CalcTextSize(text).X + (ImGui.GetStyle().FramePadding.X * 2f);
+        if (actualSize.Y <= 0f)
+            actualSize.Y = ImGui.GetFrameHeight();
+
+        bool pressed = ImGui.InvisibleButton($"##{id}", actualSize);
+        bool hovered = ImGui.IsItemHovered();
+        bool held = ImGui.IsItemActive();
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        var drawList = ImGui.GetWindowDrawList();
+
+        const float rounding = 4f;
+
+        Vector4 neutralBaseColor = held
+            ? new Vector4(0.06f, 0.06f, 0.06f, 1f)
+            : hovered
+                ? new Vector4(0.10f, 0.10f, 0.10f, 1f)
+                : new Vector4(0.08f, 0.08f, 0.08f, 1f);
+
+        drawList.AddRectFilled(min, max, ImGui.ColorConvertFloat4ToU32(neutralBaseColor), rounding);
+
+        Vector2 insetMin = min + new Vector2(1f, 1f);
+        Vector2 insetMax = max - new Vector2(1f, 1f);
+        DrawAngledGradientRect(drawList, insetMin, insetMax, startColor, endColor, angleDegrees, startPercent, endPercent);
+
+        DrawVerticalOverlayGradient(
+            drawList,
+            insetMin,
+            insetMax,
+            new Vector4(1f, 1f, 1f, hovered ? 0.035f : 0.02f),
+            new Vector4(1f, 1f, 1f, 0.00f),
+            true);
+
+        DrawVerticalOverlayGradient(
+            drawList,
+            insetMin,
+            insetMax,
+            new Vector4(0f, 0f, 0f, 0.00f),
+            new Vector4(0f, 0f, 0f, held ? 0.10f : 0.06f),
+            false);
+
+        Vector4 textColor = textColorOverride ?? WhiteText;
+        Vector2 textSize = ImGui.CalcTextSize(text);
+        Vector2 textPos = new(
+            min.X + ((max.X - min.X) - textSize.X) * 0.5f,
+            min.Y + ((max.Y - min.Y) - textSize.Y) * 0.5f);
+
+        uint shadowColor = ImGui.ColorConvertFloat4ToU32(new Vector4(0f, 0f, 0f, 0.32f));
+        uint drawColor = ImGui.ColorConvertFloat4ToU32(textColor);
+        drawList.AddText(textPos + new Vector2(0f, 1f), shadowColor, text);
+        drawList.AddText(textPos, drawColor, text);
+        drawList.AddText(textPos + new Vector2(1f, 0f), drawColor, text);
+
+        return pressed;
+    }
+
+    private void DrawAngledGradientRect(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        Vector4 startColor,
+        Vector4 endColor,
+        float angleDegrees,
+        float startPercent,
+        float endPercent)
+    {
+        float width = MathF.Max(1f, max.X - min.X);
+        float height = MathF.Max(1f, max.Y - min.Y);
+
+        float angleRadians = angleDegrees * (MathF.PI / 180f);
+        Vector2 direction = Vector2.Normalize(new Vector2(MathF.Cos(angleRadians), MathF.Sin(angleRadians)));
+
+        Vector2[] corners =
+        {
+            min,
+            new Vector2(max.X, min.Y),
+            max,
+            new Vector2(min.X, max.Y)
+        };
+
+        float minProjection = float.MaxValue;
+        float maxProjection = float.MinValue;
+        foreach (var corner in corners)
+        {
+            float projection = Vector2.Dot(corner, direction);
+            minProjection = MathF.Min(minProjection, projection);
+            maxProjection = MathF.Max(maxProjection, projection);
+        }
+
+        float clampedStart = Math.Clamp(startPercent, 0f, 1f);
+        float clampedEnd = Math.Clamp(endPercent, 0f, 1f);
+
+        float lowPercent = MathF.Min(clampedStart, clampedEnd);
+        float highPercent = MathF.Max(clampedStart, clampedEnd);
+
+        float gradientStart = minProjection + ((maxProjection - minProjection) * lowPercent);
+        float gradientEnd = minProjection + ((maxProjection - minProjection) * highPercent);
+
+        int columns = 40;
+        int rows = 12;
+        float cellWidth = width / columns;
+        float cellHeight = height / rows;
+
+        Vector4 boostedStartColor = BoostRedSide(startColor);
+
+        for (int row = 0; row < rows; row++)
+        {
+            for (int column = 0; column < columns; column++)
+            {
+                Vector2 cellMin = new(min.X + (column * cellWidth), min.Y + (row * cellHeight));
+                Vector2 cellMax = new(
+                    column == columns - 1 ? max.X : cellMin.X + cellWidth + 0.5f,
+                    row == rows - 1 ? max.Y : cellMin.Y + cellHeight + 0.5f);
+
+                Vector2 center = new((cellMin.X + cellMax.X) * 0.5f, (cellMin.Y + cellMax.Y) * 0.5f);
+                float projection = Vector2.Dot(center, direction);
+                float t = (projection - gradientStart) / MathF.Max(gradientEnd - gradientStart, 0.001f);
+                t = Math.Clamp(t, 0f, 1f);
+
+                float biasedT = MathF.Pow(t, 1.65f);
+                Vector4 color = LerpColor(boostedStartColor, endColor, biasedT);
+                drawList.AddRectFilled(cellMin, cellMax, ImGui.ColorConvertFloat4ToU32(color));
+            }
+        }
+    }
+
+    private void DrawVerticalOverlayGradient(
+        ImDrawListPtr drawList,
+        Vector2 min,
+        Vector2 max,
+        Vector4 topColor,
+        Vector4 bottomColor,
+        bool strongerAtTop)
+    {
+        float height = MathF.Max(1f, max.Y - min.Y);
+        int rows = 10;
+        float rowHeight = height / rows;
+
+        for (int row = 0; row < rows; row++)
+        {
+            float t0 = row / (float)rows;
+            float t1 = (row + 1f) / rows;
+
+            Vector4 color0 = LerpColor(topColor, bottomColor, t0);
+            Vector4 color1 = LerpColor(topColor, bottomColor, t1);
+
+            Vector2 rowMin = new(min.X, min.Y + (row * rowHeight));
+            Vector2 rowMax = new(max.X, row == rows - 1 ? max.Y : rowMin.Y + rowHeight + 0.5f);
+
+            uint fillColor = ImGui.ColorConvertFloat4ToU32(LerpColor(color0, color1, 0.5f));
+            drawList.AddRectFilled(rowMin, rowMax, fillColor);
+        }
+    }
+
+    private static Vector4 LerpColor(Vector4 a, Vector4 b, float t)
+    {
+        t = Math.Clamp(t, 0f, 1f);
+        return new Vector4(
+            a.X + ((b.X - a.X) * t),
+            a.Y + ((b.Y - a.Y) * t),
+            a.Z + ((b.Z - a.Z) * t),
+            a.W + ((b.W - a.W) * t));
+    }
+
+    private static Vector4 BoostRedSide(Vector4 color)
+    {
+        return new Vector4(
+            Math.Clamp(color.X + 0.26f, 0f, 1f),
+            Math.Clamp(color.Y - 0.07f, 0f, 1f),
+            Math.Clamp(color.Z - 0.03f, 0f, 1f),
+            color.W);
+    }
+
     private static Vector4 Lighten(Vector4 color, float amount)
     {
         return new Vector4(
@@ -1248,6 +1680,10 @@ private void DrawMessageSection()
         {
             "Ascending" => history.OrderBy(x => ParseTimestamp(x.Timestamp)).ToList(),
             "Results" => history.OrderByDescending(x => ParseSignedFormatted(x.Result)).ToList(),
+            "Blackjack" when IsPlayerMode => history
+                .OrderByDescending(x => x.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase))
+                .ThenByDescending(x => ParseTimestamp(x.Timestamp))
+                .ToList(),
             "Tips" when IsDealerMode => history.OrderByDescending(x => ParseBankValue(x.Tips)).ToList(),
             _ => history.OrderByDescending(x => ParseTimestamp(x.Timestamp)).ToList(),
         };

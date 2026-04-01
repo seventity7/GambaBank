@@ -4,6 +4,7 @@
   "Punchline": "Easily keep track of your Start/Final bank and results. For gamba Dealers by a gamba Dealer.",
   "Description": "Simple and fast way to know your night gamba results.",
   "ApplicableVersion": "any",
+  "IconUrl": "https://raw.githubusercontent.com/seventity7/GambaBank/main/bank.png",
   "Tags": [
     "math",
     "plugin",
