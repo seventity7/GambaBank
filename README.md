@@ -1,5 +1,5 @@
-# `Changelog 1.0.3.1 - 01/04/2026`
-`+Minor follow up from 1.0.3`
+## `Changelog 1.0.3 - 31/03/2026`
+`+Minor follow up 1.0.3.1 01/04/2026`
 
 ## ✨ Added
 
@@ -198,14 +198,18 @@ Need to add more bank? Use the "Add Bank" section to keep the track going real-t
 
 **Bryer**
 
-## **💬 Support**
-If you encounter issues or have suggestions:
+## **💬 Support/Help**
+_If you encounter issues or have suggestions:_
 
 - Open an issue on GitHub
 - Or contact via Discord
 
+You can also type `/gamba help`or `/bank help` in-game to see the plugin Help window
+<img width="1036" height="749" alt="Un1titled" src="https://github.com/user-attachments/assets/6e50835e-6a58-44ea-8bf2-b3cd7f466c16" />
+
+
 ## **📜 License**
 
-This project is provided as-is for personal use within FFXIV.
+This project is provided as-is for personal use within FFXIV © Do not distribute/modify without permission.
 
 <img width="1194" height="427" alt="sdd(1)" src="https://github.com/user-attachments/assets/4a00b3ce-a7f8-40ab-92b3-bdde453d3ea4" />
