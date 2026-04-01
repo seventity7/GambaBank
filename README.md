@@ -1,4 +1,5 @@
-# `Changelog 1.0.3 - 03/31/2026`
+# `Changelog 1.0.3.1 - 01/04/2026`
+`+Minor follow up from 1.0.3`
 
 ## ✨ Added
 
@@ -18,14 +19,14 @@
   - Added **Auto Track** toggle for automated player result tracking
   - Can track a selected dealer and react to party chat results automatically
 
-📊 History System
-_Stores full session data:_
-- Date
-- Time
-- Starting Bank
-- Final Bank
-- Tips
-- Results
+- 📊 History System
+ _Stores full session data:_
+ - Date
+ - Time
+ - Starting Bank
+ - Final Bank
+ - Tips
+ - Results
 
 - 🎯 **Dealer tracking**
   - Added **Track Dealer** support based on the current target
@@ -46,10 +47,6 @@ _Stores full session data:_
 
 - 💰 **Banking tools**
   - Added quick banking increment buttons:
-    - `+50K`
-    - `+100K`
-    - `+250K`
-    - `+500K`
     - `+1M`
   - Added manual banking amount field
   - Added **Add Bank** button to add banking directly to Current Bank
@@ -110,7 +107,7 @@ _Stores full session data:_
 - 🔸 Dealer Mode: Track Start Bank, Final Bank, Tips, Day results, All time profits/losses
 - 🔸 Player mode: Real-time tracking of betting, losses, wins and banking
  - Automaticaly register blackjack Win/Lost/Bust/Bank
- - Automaticaly register history of every Win/Lost/Bust/Banking with they amount
+ - Automaticaly register history of every Blackjack/Win/Lost/Bust/Banking with they amount
 - 🔸 Real-time profit/loss results calculation
 - 🔸 Fully in-game UI (/bank)
  - Dealer UI individualy from Player UI
@@ -140,7 +137,8 @@ Create new profiles or edit existing ones. Each one saves its own configuration 
 
 ## Main Window
 ### Dealer Mode:
-<img width="1077" height="522" alt="Unt12itled" src="https://github.com/user-attachments/assets/99686ed9-35c2-4ce4-9541-668c7cc607c0" />
+<img width="1076" height="520" alt="Untit3led" src="https://github.com/user-attachments/assets/53649096-299d-42b9-9176-ebd7ca61eab0" />
+
 
 - Result = `Starting Bank - Final Bank - Tips`
 - Example: Starting Bank: `10.000.000`
@@ -148,35 +146,46 @@ Create new profiles or edit existing ones. Each one saves its own configuration 
 - Tips: `2.000.000`
 - Result: `+ 3.000.000`
 
-- Dealer history registers every Start/Final Bank, Tips, Date/Time, House/Club Name
+Dealer history registers every Start/Final Bank, Tips, Date/Time, House/Club Name
 
 <img width="1077" height="158" alt="Un3t122itled" src="https://github.com/user-attachments/assets/2b54f1e0-a949-450a-917d-8bbc97a3f358" />
 
-- Create your own generated message to personalize your result message through the plugin config window.
+Create your own generated message to personalize your result message through the plugin config window.
 
 <img width="1149" height="261" alt="Un43t1224itled" src="https://github.com/user-attachments/assets/56bdea94-e7bd-49f3-bd73-6624c20676f4" />
 
 
 ### Player Mode:
-<img width="1077" height="522" alt="Unt122itled" src="https://github.com/user-attachments/assets/652e6664-99b5-4011-b27f-5cf43a181e25" />
 
-- Realtime Bet/Banking Tracking
-- Manual inputs foor registering Win/Loss _(if you want to)_
-- Dealer tracking > it will pickup the match results only sent by that person
-
-
-- Full history that shows every Round results with the Banking/Bet/Wins/Losses results
-
-<img width="1027" height="197" alt="Un43t123234itled" src="https://github.com/user-attachments/assets/d2acb95e-bed5-4791-a844-2de8ee8b6688" />
-
-- Realtime Bet/Banking Tracking
 - Type your initial banking on `Starting Bank`, e.g: `10.000.000`
 - Type the club/house if you want on `House`
 - Type your current Bet
-- Target the dealer and click "Track Dealer"
-- Need to add more bank? Use the "Add Bank" section to keep the track going real-time
+- Target the dealer and click `Track Dealer`
+- Click `Auto Track`
 
-<img width="654" height="113" alt="Un43t12234itled" src="https://github.com/user-attachments/assets/6d176ebc-ab09-45e1-abbc-2d92a4d3a1e5" />
+<img width="1076" height="516" alt="Un2tit3led" src="https://github.com/user-attachments/assets/1558023a-23ac-4ced-9f95-4a5bf57b8290" />
+
+
+- Realtime Bet Tracking
+- Manual inputs foor registering Win/Loss _(if you want to)_
+- Dealer tracking > it will pickup the match results only sent by that person
+
+Blackjack(21) prize needs to be registered manually through the buttons/multipliers for NatBJ and DirtyBJ
+- Use the multiplier buttons to select it accordling for Nat/Dirty. Default: `Nat: 2.5x` & `Dirty: 1.0x`
+- Gamba bank will automaticaly register the prize into your `Banking` and `Player history` once pressed
+<img width="160" height="90" alt="Un234tit53led" src="https://github.com/user-attachments/assets/db4bbc5b-4ffc-40a6-8902-abd02a2e1b0a" />
+
+
+Full history that shows every Round results with the Blackjack/Banking/Bet/Wins/Losses results
+
+<img width="1076" height="236" alt="Un2tit53led" src="https://github.com/user-attachments/assets/ad415301-986a-4186-8ded-a84fa5c51ee2" />
+
+
+Need to add more bank? Use the "Add Bank" section to keep the track going real-time
+- Real time bank tracking
+
+<img width="1076" height="102" alt="Un23tit53led" src="https://github.com/user-attachments/assets/a9657e25-a920-445a-a866-0714be32478e" />
+
 
 ## **✏️ Customization**
 ### _Customize message labels directly in the UI:_
