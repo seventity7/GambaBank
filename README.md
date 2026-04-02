@@ -1,103 +1,97 @@
-## `Changelog 1.0.3 - 31/03/2026`
-`+Minor follow up 1.0.3.1 01/04/2026`
+## `Changelog 1.0.3 - March 31-2026`
+`+Minor follow up 1.0.3.1/1.0.3.2/1.0.3.3 Apr 01 > Apr 02-2026`
 
-## ✨ Added
+## **✨ Added:**
 
-- 🎭 **Dual Mode system**
-  - Added separate **Dealer** and **Player** modes
-  - Each mode now has its own workflow and dedicated history behavior
-
-- 🏠 **House field**
-  - Added a new **House** input field
-  - Saved to history for better session organization
-
-- 🔎 **History search**
-  - Added a **Search** field to quickly find entries in history
-  - Supports searching across saved session information
-
-- 🤖 **Auto Track system (Player Mode)**
-  - Added **Auto Track** toggle for automated player result tracking
-  - Can track a selected dealer and react to party chat results automatically
-
-- 📊 History System
- _Stores full session data:_
- - Date
- - Time
- - Starting Bank
- - Final Bank
- - Tips
- - Results
-
-- 🎯 **Dealer tracking**
-  - Added **Track Dealer** support based on the current target
-  - Allows selecting a specific dealer to monitor instead of reading unrelated chat
-
-- 📊 **Player session auto-history**
-  - Player Mode now automatically saves entries to history when tracked results happen
-  - Supports:
-    - Wins
-    - Losses
-    - Busts
-    - Pushes
-    - Banking
-
-- 🧮 **Repeated result detection**
-  - Auto Track supports cases where the same player name appears multiple times in one result line
-  - Correctly multiplies gains/losses based on how many times the player appears
-
-- 💰 **Banking tools**
-  - Added quick banking increment buttons:
-    - `+1M`
-  - Added manual banking amount field
-  - Added **Add Bank** button to add banking directly to Current Bank
-
-## 🛠️ Fixed
-
-- 🧷 Fixed multiple Player Mode layout and alignment issues
-- 🧯 Fixed clipping/cropping issues affecting controls in the tracking/banking area
-- 🧹 Fixed compile issues related to helper methods and Dalamud namespace usage
-
-## 🎨 UI Overhaul + Quality of Life
-
-- 🚦 Added status feedback for tracking:
-  - **ON / OFF** tracking state
-  - Temporary round-result feedback such as:
-    - `You won!`
-    - `You Lost!`
-    - `You Busted!`
-    - `Bet Pushed!`
-
-- ⛔ Added protection states for bet input:
-  - **Need Start Bank** when no starting bank is set
-  - **Not enough bank** when Current Bank is too low for the current bet
-
-## 📝 Improved
-
-- 📚 Dealer and Player workflows are much more distinct and easier to use
-- 🗂️ Player History have better reflects round-by-round results
-- 📈 History entries accurately represent:
-  - Start Bank
-  - Total Bank
-  - Result outcome
-  - House
-  - Timestamp
-
-- ⚙️ Auto tracking logic is now more robust for real blackjack hosting scenarios where result messages may contain:
-  - multiple player names
-  - repeated names
-  - mixed result categories in a single line
-
-## 🧾 Notes
-
-- **Player Mode** is designed for automated round tracking and quick personal bankroll management, meant for as you are playing the game
-- **Dealer Mode** remains focused on manual session/result tracking, meant for as you are Dealing the game
-- Auto Track only reacts to the tracked dealer’s party chat messages
-- Push results do not modify Current Bank, but are still saved to history properly
-
-`End of changelog`
+📊 Tracker Status Panel
+- Added a live **Tracker Status** panel in Player mode
+- Shows tracking state for:
+  - Wins
+  - Losses
+  - Blackjacks
+  - Double-Downs
 
 
-# **💰 Gamba Bank**
+📒 Dealer Session Tools
+- Added session checkpoints:
+  - Start Shift
+  - Break
+  - Resume
+  - End Shift
+- Added current session status display for Dealer mode
+- Added quick tips buttons for faster tip entry
+
+
+📁 History System Improvements
+- Added grouped history display by day
+- History groups can now be expanded or collapsed
+- Added clickable history entries for quick detail viewing
+- Added a Dealer session summary viewer
+
+
+📤 Export & Backup
+- Added history export in:
+  - TXT
+  - Spreadsheet-style CSV/Excel-compatible format
+- Added export directory selection
+- Added automatic Dealer backups:
+  - on End Shift
+  - daily backup support
+- Backup entries are now registered clearly in history
+
+
+🧠 Smart Input Helpers
+- Added House field suggestions/autocomplete
+- Added better export path feedback after saving files
+- Added inline export directory picker from the history panel
+
+
+❓ Help & Settings Access
+- Added quick access to **Settings** from the main top bar
+
+
+## **🛠️ Fixed**
+
+- Fixed tracking flow issues where some live results were not being applied correctly
+- Fixed Player History saving so tracked changes are recorded more accurately
+- Fixed repeated-result handling during Auto Track sessions
+
+
+## **📝 Improved**
+
+- 🎨 Improved visual organization across both Dealer and Player layouts
+- 🧭 Cleaner separation between tracking, banking, and history tools
+- 📈 Better readability for history results with color-based feedback
+- 📂 Export flow is now easier to access directly from the history area
+- 🖱️ More interactive history behavior with grouped dates and clickable entries
+- ⚡ Faster Dealer workflow for session logging and tip entry
+- 🎯 Player mode now feels more complete for active live-session use
+
+
+## **🧾 Notes**
+### _Current behavior:_
+
+- Dealer and Player mode keep their own dedicated history flow
+- Auto backups use the configured backup directory when available
+- History exports can be redirected to a custom export folder
+- Player tracking tools are designed for live use during active matches
+
+
+## **📌 Summary**
+### _This update focuses on:_
+
+- 🎮 Stronger Player mode tracking
+- 📒 Better Dealer session control
+- 📤 Easier export and backup handling
+- 🧠 Smarter history organization
+- 🎨 UI / UX polish
+- 🛠️ Stability and workflow improvements
+
+
+**`End of changelog 1.0.3.3`**
+# 
+
+# **💰 Gamba Bank** `Readme Updated Apr 01 - 2026`
 
 - Designed to help players track their gil gains and losses in a simple and clean way.
 - It provides in-game calculator that formats values automatically and generates a ready-to-copy message for sharing results.

@@ -110,6 +110,12 @@ public sealed class Plugin : IDalamudPlugin
         Instance?.ShowHelpWindow();
     }
 
+    public static void OpenConfigUi()
+    {
+        if (Instance != null)
+            Instance.ConfigWindow.IsOpen = true;
+    }
+
     public void ToggleMainUi() => MainWindow.Toggle();
     public void ToggleConfigUi() => ConfigWindow.Toggle();
 }

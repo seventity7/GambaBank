@@ -41,10 +41,12 @@ public class HelpWindow : Window, IDisposable
 
         DrawSectionTitle("♯ Dealer mode");
         DrawRichLine(
-            Txt("Start by typing your initial Banking on the field "),
+            Txt("Type your initial Banking on the field "),
             HiCol("Starting Bank:", ProfitColor));
         DrawRichLine(
-            Txt("At the end of your shift as a Dealer, type your Final Bank in its field."));
+            Txt("Start by pressing the "),
+            GoldTxt("Start Shift "),
+            Txt("button."));
         DrawRichBullet(
             Txt("If you got any tips from people, type they total value on the "),
             HiCol("Tips", TipsColor),
@@ -52,6 +54,10 @@ public class HelpWindow : Window, IDisposable
         DrawRichBullet(
             Txt("If you want, type the name of the place you'r dealing into the field "),
             HiCol("House", GoldColor));
+        DrawRichLine(
+            Txt("At the end of your shift as a Dealer, type your Final Bank in its field and hit the "),
+            Col("End Shift", LossColor),
+            Txt("button"));
         ImGui.Spacing();
         DrawRichLine(
             Txt("Once done, hit the "),
@@ -73,6 +79,12 @@ public class HelpWindow : Window, IDisposable
             Txt(" to sort all results or the field "),
             HiCol("Search", GoldColor),
             Txt(" to manualy filter it"));
+        DrawRichLine(
+            Txt("You can also "),
+            HiCol("Export", GoldColor),
+            Txt(" all your history to a "),
+            HiCol(".txt/.csv", ProfitColor),
+            Txt("File"));
 
         ImGui.Spacing();
         DrawSectionTitle("★ Player mode");
@@ -148,6 +160,12 @@ public class HelpWindow : Window, IDisposable
             Txt("Gamba Bank will track the match in real-time, updating Current Bank and "),
             HiCol("Results", ProfitColor),
             Txt(" automaticaly based on your initial bank + match results."));
+        DrawRichLine(
+            Txt("You can also "),
+            HiCol("Export", GoldColor),
+            Txt(" all your history to a "),
+            HiCol(".txt/.csv", ProfitColor),
+            Txt("File"));
         DrawRichLine(
             Txt("It will also register everything on your "),
             GoldTxt("Player History"));

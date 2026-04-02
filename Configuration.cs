@@ -22,6 +22,12 @@ public class Configuration : IPluginConfiguration
     public string SelectedTheme { get; set; } = "Default";
     public string ActiveProfileName { get; set; } = "Default";
     public string ActiveMode { get; set; } = "Dealer";
+    public bool DealerRequireSaveConfirmation { get; set; } = true;
+    public bool DealerAutoBackupOnEndShift { get; set; } = false;
+    public bool DealerAutoDailyBackup { get; set; } = false;
+    public string DealerBackupDirectory { get; set; } = string.Empty;
+    public string DealerLastDailyBackupDate { get; set; } = string.Empty;
+    public string HistoryExportDirectory { get; set; } = string.Empty;
 
     public List<ProfileData> Profiles { get; set; } = new();
 

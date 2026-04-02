@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Globalization;
+using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text;
@@ -51,6 +53,35 @@ public class MainWindow : Window, IDisposable
     private DateTime currentBetDisplayOverrideUntilUtc = DateTime.MinValue;
     private string currentBetDisplayOverrideText = string.Empty;
     private Vector4 currentBetDisplayOverrideColor = new(1f, 1f, 1f, 1f);
+
+    private enum TrackerIndicatorState
+    {
+        Off,
+        On,
+        Error
+    }
+
+    private TrackerIndicatorState trackerWinsState = TrackerIndicatorState.Off;
+    private TrackerIndicatorState trackerLossesState = TrackerIndicatorState.Off;
+    private TrackerIndicatorState trackerBlackjacksState = TrackerIndicatorState.Off;
+    private TrackerIndicatorState trackerDoubleDownsState = TrackerIndicatorState.Off;
+    private string dealerHouseFilter = "All";
+    private string dealerResultFilter = "All";
+    private string dealerDateFilter = "All";
+    private DateTime dealerExportStatusUntilUtc = DateTime.MinValue;
+    private string dealerExportStatusText = string.Empty;
+    private string dealerExportDirectoryPath = string.Empty;
+    private string dealerExportFileName = string.Empty;
+    private string dealerExportFilePath = string.Empty;
+    private bool dealerExportFailed;
+    private bool showDealerShiftSummaryWindow;
+    private bool showDealerHistoryDetailWindow;
+    private HistoryEntry? selectedDealerHistoryEntry;
+    private string selectedDealerHistoryDetailId = string.Empty;
+    private bool showHistoryExportDirectoryPopup;
+    private string historyExportDirectoryInput = string.Empty;
+    private readonly HashSet<string> collapsedHistoryDateGroups = new(StringComparer.OrdinalIgnoreCase);
+
     private DateTime doubleDownPromptUntilUtc = DateTime.MinValue;
     private DateTime doubleDownPendingUntilUtc = DateTime.MinValue;
 
@@ -79,7 +110,7 @@ public class MainWindow : Window, IDisposable
     private static readonly Vector4 DangerButtonColor = Hex("#520000");
     private static readonly Vector4 WhiteText = new(1.0f, 1.0f, 1.0f, 1.0f);
 
-    private static readonly Vector4 DealerButtonColor = Hex("#ffbb00");
+    private static readonly Vector4 DealerButtonColor = Hex("#DA9E00");
     private static readonly Vector4 PlayerButtonColor = Hex("#006496");
     private static readonly Vector4 WinButtonColor = Hex("#098500");
     private static readonly Vector4 LossButtonColor = Hex("#852100");
@@ -91,6 +122,12 @@ public class MainWindow : Window, IDisposable
     private static readonly Vector4 HelpButtonHoverColor = Hex("#3A3A3A");
     private static readonly Vector4 HelpButtonActiveColor = Hex("#4A4A4A");
     private static readonly Vector4 HelpButtonTextColor = Hex("#FF8A8A");
+    private static readonly Vector4 DealerQuickTip100Color = WithAlpha(Hex("#d463cc"), 0.85f);
+    private static readonly Vector4 DealerQuickTip500Color = WithAlpha(Hex("#a054d6"), 0.85f);
+    private static readonly Vector4 DealerQuickTip1MColor = WithAlpha(Hex("#545ad6"), 0.85f);
+    private static readonly Vector4 DealerBreakColor = Hex("#292f56");
+    private static readonly Vector4 DealerResumeColor = Hex("#741a53");
+    private static readonly Vector4 DealerExportCsvColor = Hex("#9EB60A");
 
     private bool IsPlayerMode => string.Equals(Plugin.Configuration.ActiveMode, "Player", StringComparison.OrdinalIgnoreCase);
     private bool IsDealerMode => !IsPlayerMode;
@@ -143,6 +180,14 @@ public class MainWindow : Window, IDisposable
         ImGui.Spacing();
 
         DrawHistorySection();
+
+        if (IsDealerMode)
+        {
+            TryAutoDailyDealerBackup();
+            DrawDealerShiftSummaryWindow();
+            DrawDealerHistoryDetailWindow();
+        }
+
     }
 
     private void DrawProfilesSection()
@@ -185,13 +230,43 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton("Delete Current", "DeleteCurrentButton", new Vector2(120f, 0f), DangerButtonColor) && Plugin.Configuration.Profiles.Count > 1)
             DeleteCurrentProfile();
 
-        ImGui.SameLine();
-        AlignTopRightControls(70f + 70f + 22f + (ImGui.GetStyle().ItemSpacing.X * 2f));
+        const float settingsButtonWidth = 72f;
+        const float helpButtonWidth = 58f;
+        const float modeButtonWidth = 70f;
+        const float questionButtonWidth = 22f;
+        const float dividerVisualWidth = 8f;
 
+        ImGui.SameLine();
+        AlignTopRightControls(
+            settingsButtonWidth +
+            dividerVisualWidth +
+            helpButtonWidth +
+            dividerVisualWidth +
+            modeButtonWidth +
+            modeButtonWidth +
+            questionButtonWidth +
+            (ImGui.GetStyle().ItemSpacing.X * 6f));
+
+        if (DrawStyledBoldButton("Settings", "OpenSettingsWindowButton", new Vector2(settingsButtonWidth, 20f), Hex("#9784e8"), WhiteText))
+            Plugin.OpenConfigUi();
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("|");
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Help", "OpenHelpWindowButton", new Vector2(helpButtonWidth, 20f), Hex("#2aa163"), WhiteText))
+            Plugin.OpenHelpUi();
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("|");
+
+        ImGui.SameLine();
         if (DrawStyledBoldButton(
                 "Dealer",
                 "DealerModeButton",
-                new Vector2(70f, 20f),
+                new Vector2(modeButtonWidth, 20f),
                 IsDealerMode ? DealerButtonColor : Darken(DealerButtonColor, 0.20f),
                 WhiteText,
                 pulsatingGlow: IsDealerMode))
@@ -203,7 +278,7 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton(
                 "Player",
                 "PlayerModeButton",
-                new Vector2(70f, 20f),
+                new Vector2(modeButtonWidth, 20f),
                 IsPlayerMode ? PlayerButtonColor : Darken(PlayerButtonColor, 0.20f),
                 WhiteText,
                 pulsatingGlow: IsPlayerMode))
@@ -228,16 +303,19 @@ public class MainWindow : Window, IDisposable
 
     private void DrawDealerBankFields()
     {
-        if (!ImGui.BeginTable("##DealerBankFieldsTable", 7, ImGuiTableFlags.SizingFixedFit))
+        DrawDealerSessionStatusSection();
+        ImGui.Spacing();
+        DrawDealerCheckpointButtons();
+        ImGui.Spacing();
+
+        if (!ImGui.BeginTable("##DealerBankFieldsTable", 5, ImGuiTableFlags.SizingFixedFit))
             return;
 
         ImGui.TableSetupColumn("Label1", ImGuiTableColumnFlags.WidthFixed, 95f);
         ImGui.TableSetupColumn("Value1", ImGuiTableColumnFlags.WidthFixed, 145f);
         ImGui.TableSetupColumn("Label2", ImGuiTableColumnFlags.WidthFixed, 95f);
         ImGui.TableSetupColumn("Value2", ImGuiTableColumnFlags.WidthFixed, 145f);
-        ImGui.TableSetupColumn("Label3", ImGuiTableColumnFlags.WidthFixed, 55f);
-        ImGui.TableSetupColumn("Value3", ImGuiTableColumnFlags.WidthFixed, 130f);
-        ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 170f);
+        ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 150f);
 
         ImGui.TableNextRow();
 
@@ -251,28 +329,27 @@ public class MainWindow : Window, IDisposable
             145f,
             OnStartingBankCommitted);
 
+        DrawReadOnlyNumericCell(2, 3, "Results:", "##Results", GetCurrentResultText(), 145f);
+
+        ImGui.TableSetColumnIndex(4);
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(4f, ImGui.GetStyle().ItemSpacing.Y));
+        if (DrawStyledBoldButton("Save", "SaveToHistoryButton", new Vector2(70f, 0f), CopyButtonColor))
+            AddHistoryEntry();
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Clear", "DealerClearButton", new Vector2(70f, 0f), LossButtonColor, WhiteText))
+            ClearCurrentInputs();
+        ImGui.PopStyleVar();
+
+        ImGui.TableNextRow();
+
         DrawEditableNumericCell(
-            2,
-            3,
+            0,
+            1,
             "Final Bank:",
             "##FinalBank",
             ref finalBankInput,
             ref finalBankValue,
             145f);
-
-        DrawEditableTextCell(4, 5, "House:", "##HouseInput", ref houseInput, 130f);
-
-        ImGui.TableSetColumnIndex(6);
-        if (DrawStyledBoldButton("Save", "SaveToHistoryButton", new Vector2(70f, 0f), CopyButtonColor))
-            AddHistoryEntry();
-
-        ImGui.SameLine();
-        if (DrawStyledBoldButton("Clear", "DealerClearButton", new Vector2(70f, 0f), LossButtonColor, WhiteText))
-            ClearCurrentInputs();
-
-        ImGui.TableNextRow();
-
-        DrawReadOnlyNumericCell(0, 1, "Results:", "##Results", GetCurrentResultText(), 145f);
 
         DrawEditableNumericCell(
             2,
@@ -282,6 +359,27 @@ public class MainWindow : Window, IDisposable
             ref tipsInput,
             ref tipsValue,
             145f);
+
+        ImGui.TableNextRow();
+
+        DrawEditableHouseSuggestCell(0, 1, "House:", "##HouseInput", ref houseInput, 145f);
+
+        ImGui.TableSetColumnIndex(2);
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Quick tips:");
+
+        ImGui.TableSetColumnIndex(3);
+        ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, new Vector2(2f, ImGui.GetStyle().ItemSpacing.Y));
+        const float quickTipButtonWidth = 47f;
+        if (DrawStyledBoldButton("+100K", "DealerTips100KButton", new Vector2(quickTipButtonWidth, 0f), DealerQuickTip100Color, WhiteText))
+            IncrementDealerTips(100_000);
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("+500K", "DealerTips500KButton", new Vector2(quickTipButtonWidth, 0f), DealerQuickTip500Color, WhiteText))
+            IncrementDealerTips(500_000);
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("+1M", "DealerTips1MButton", new Vector2(quickTipButtonWidth, 0f), DealerQuickTip1MColor, WhiteText))
+            IncrementDealerTips(1_000_000);
+        ImGui.PopStyleVar();
 
         ImGui.EndTable();
     }
@@ -400,6 +498,7 @@ public class MainWindow : Window, IDisposable
         const float clonedBlockWidth = 145f;
         const float separatorColumnWidth = 14f;
         const float dealerBlockWidth = 145f;
+        const float trackerStatusColumnWidth = 300f;
 
         float spacing = ImGui.GetStyle().ItemSpacing.X;
         float originalButtonWidth = (betFieldWidth - spacing) * 0.5f;
@@ -431,7 +530,7 @@ public class MainWindow : Window, IDisposable
             currentBetDisplayColor = currentBetOverrideColor;
         }
 
-        if (!ImGui.BeginTable("##PlayerTrackingUnifiedLayout", 6, ImGuiTableFlags.SizingFixedFit))
+        if (!ImGui.BeginTable("##PlayerTrackingUnifiedLayout", 8, ImGuiTableFlags.SizingFixedFit))
             return;
 
         ImGui.TableSetupColumn("TrackingLabelColumn", ImGuiTableColumnFlags.WidthFixed, labelWidth);
@@ -440,6 +539,10 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("TrackingCloneColumn", ImGuiTableColumnFlags.WidthFixed, clonedBlockWidth);
         ImGui.TableSetupColumn("TrackingSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, separatorColumnWidth);
         ImGui.TableSetupColumn("TrackingDealerColumn", ImGuiTableColumnFlags.WidthFixed, dealerBlockWidth);
+        ImGui.TableSetupColumn("TrackingStatusSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, separatorColumnWidth);
+        ImGui.TableSetupColumn("TrackingStatusColumn", ImGuiTableColumnFlags.WidthFixed, trackerStatusColumnWidth);
+
+        RefreshTrackerIndicatorStates();
 
         // Row 1
         ImGui.TableNextRow();
@@ -495,6 +598,12 @@ public class MainWindow : Window, IDisposable
         if (IsTrackDealerButtonDisabled)
             ImGui.EndDisabled();
 
+        ImGui.TableSetColumnIndex(6);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(7);
+        DrawTrackerStatusTitle("Tracker Status:", trackerStatusColumnWidth);
+
         // Row 2
         ImGui.TableNextRow();
 
@@ -536,6 +645,19 @@ public class MainWindow : Window, IDisposable
             SaveCurrentProfileValues();
         }
 
+        ImGui.TableSetColumnIndex(6);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(7);
+        DrawTrackerStatusLine(
+            "Wins:",
+            ProfitColor,
+            trackerWinsState,
+            "Losses:",
+            LossColor,
+            trackerLossesState,
+            trackerStatusColumnWidth);
+
         // Row 3
         ImGui.TableNextRow();
 
@@ -556,6 +678,7 @@ public class MainWindow : Window, IDisposable
                 WhiteText))
         {
             playerAutoTrackEnabled = !playerAutoTrackEnabled;
+            ResetTrackerIndicatorStates();
             SaveCurrentProfileValues();
         }
 
@@ -577,8 +700,22 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton("Clear", "ClearTrackedDealerButton", new Vector2(dealerBlockWidth, 0f), LossButtonColor, WhiteText))
         {
             trackedDealerInput = string.Empty;
+            ResetTrackerIndicatorStates();
             SaveCurrentProfileValues();
         }
+
+        ImGui.TableSetColumnIndex(6);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(7);
+        DrawTrackerStatusLine(
+            "Blackjacks:",
+            Hex("#00c0c7"),
+            trackerBlackjacksState,
+            "Double-Downs:",
+            Hex("#ff42ef"),
+            trackerDoubleDownsState,
+            trackerStatusColumnWidth);
 
         ImGui.EndTable();
     }
@@ -657,31 +794,39 @@ public class MainWindow : Window, IDisposable
 
     private void ApplyBlackjackResult(int multiplierIndex)
     {
-        multiplierIndex = Math.Clamp(multiplierIndex, 0, BlackjackMultiplierTenths.Length - 1);
-
-        betValue = ParseBankValue(betInput);
-        betInput = FormatNumber(betValue);
-        betInputHasUserEdited = !string.IsNullOrWhiteSpace(betInput);
-
-        if (betValue <= BigInteger.Zero)
+        try
         {
+            multiplierIndex = Math.Clamp(multiplierIndex, 0, BlackjackMultiplierTenths.Length - 1);
+
+            betValue = ParseBankValue(betInput);
+            betInput = FormatNumber(betValue);
+            betInputHasUserEdited = !string.IsNullOrWhiteSpace(betInput);
+
+            if (betValue <= BigInteger.Zero)
+            {
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+                finalBankValue = startingBankValue;
+
+            BigInteger payout = (betValue * BlackjackMultiplierTenths[multiplierIndex]) / 10;
+            BigInteger previousCurrentBank = finalBankValue;
+            finalBankValue += payout;
+            lastPlayerBankChangeValue = finalBankValue - previousCurrentBank;
+            finalBankInput = FormatNumber(finalBankValue);
+
+            RemoveMostRecentHistoryEntry();
+            AddBlackjackHistoryEntry(payout);
+
             SaveCurrentProfileValues();
-            return;
         }
-
-        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
-            finalBankValue = startingBankValue;
-
-        BigInteger payout = (betValue * BlackjackMultiplierTenths[multiplierIndex]) / 10;
-        BigInteger previousCurrentBank = finalBankValue;
-        finalBankValue += payout;
-        lastPlayerBankChangeValue = finalBankValue - previousCurrentBank;
-        finalBankInput = FormatNumber(finalBankValue);
-
-        RemoveMostRecentHistoryEntry();
-        AddBlackjackHistoryEntry(payout);
-
-        SaveCurrentProfileValues();
+        catch
+        {
+            trackerBlackjacksState = TrackerIndicatorState.Error;
+            throw;
+        }
     }
 
     private void RemoveMostRecentHistoryEntry()
@@ -734,6 +879,143 @@ public class MainWindow : Window, IDisposable
         ImGui.Dummy(new Vector2(12f, height));
     }
 
+    private void DrawTrackerStatusTitle(string text, float availableWidth)
+    {
+        Vector2 start = ImGui.GetCursorScreenPos();
+        Vector2 textSize = ImGui.CalcTextSize(text);
+        float titleOffsetX = -100f;
+        float x = start.X + MathF.Max(0f, (availableWidth - textSize.X) * 0.5f) + titleOffsetX;
+        float y = start.Y + MathF.Max(0f, (ImGui.GetFrameHeight() - textSize.Y) * 0.5f);
+
+        var drawList = ImGui.GetWindowDrawList();
+        uint color = ImGui.ColorConvertFloat4ToU32(WhiteText);
+        drawList.AddText(new Vector2(x, y), color, text);
+        drawList.AddText(new Vector2(x + 1f, y), color, text);
+
+        ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
+    }
+
+    private void DrawTrackerStatusLine(
+        string leftLabel,
+        Vector4 leftLabelColor,
+        TrackerIndicatorState leftState,
+        string rightLabel,
+        Vector4 rightLabelColor,
+        TrackerIndicatorState rightState,
+        float availableWidth)
+    {
+        const float highlightPadX = 3f;
+        const float highlightPadY = 1f;
+        const float segmentGap = 4f;
+        const float rightSideGap = 10f;
+        const float leftSectionWidth = 128f;
+
+        string leftValue = GetTrackerIndicatorText(leftState);
+        string rightValue = GetTrackerIndicatorText(rightState);
+        Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
+        Vector4 rightValueColor = GetTrackerIndicatorColor(rightState);
+
+        Vector2 leftLabelSize = ImGui.CalcTextSize(leftLabel);
+        Vector2 leftValueSize = ImGui.CalcTextSize(leftValue);
+        Vector2 dividerSize = ImGui.CalcTextSize("|");
+        Vector2 rightLabelSize = ImGui.CalcTextSize(rightLabel);
+        Vector2 rightValueSize = ImGui.CalcTextSize(rightValue);
+
+        float leftLabelWidth = leftLabelSize.X + (highlightPadX * 2f);
+        float rightLabelWidth = rightLabelSize.X + (highlightPadX * 2f);
+
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float startX = start.X + 2f;
+        float dividerX = startX + leftSectionWidth;
+        float centerY = start.Y + (ImGui.GetFrameHeight() * 0.5f);
+        float textBaseY = centerY - (ImGui.GetTextLineHeight() * 0.5f);
+
+        float x = startX;
+        DrawHighlightedInlineTextSegment(leftLabel, leftLabelColor, new Vector2(x, textBaseY), highlightPadX, highlightPadY);
+        x += leftLabelWidth + segmentGap;
+
+        DrawBoldInlineTextSegment(leftValue, leftValueColor, new Vector2(x, textBaseY));
+
+        x = dividerX + rightSideGap;
+        DrawHighlightedInlineTextSegment(rightLabel, rightLabelColor, new Vector2(x, textBaseY), highlightPadX, highlightPadY);
+        x += rightLabelWidth + segmentGap;
+
+        DrawBoldInlineTextSegment(rightValue, rightValueColor, new Vector2(x, textBaseY));
+
+        ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
+    }
+
+    private void DrawHighlightedInlineTextSegment(string text, Vector4 textColor, Vector2 textPos, float padX, float padY)
+    {
+        Vector2 textSize = ImGui.CalcTextSize(text);
+        Vector2 bgMin = new(textPos.X - padX, textPos.Y - padY);
+        Vector2 bgMax = new(textPos.X + textSize.X + padX, textPos.Y + textSize.Y + padY);
+
+        var drawList = ImGui.GetWindowDrawList();
+        uint bgColor = ImGui.ColorConvertFloat4ToU32(BlackText);
+        uint color = ImGui.ColorConvertFloat4ToU32(textColor);
+
+        drawList.AddRectFilled(bgMin, bgMax, bgColor, 2f);
+        drawList.AddText(textPos, color, text);
+    }
+
+    private void DrawInlineTextSegment(string text, Vector4 color, Vector2 textPos)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddText(textPos, ImGui.ColorConvertFloat4ToU32(color), text);
+    }
+
+    private void DrawBoldInlineTextSegment(string text, Vector4 color, Vector2 textPos)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        uint col = ImGui.ColorConvertFloat4ToU32(color);
+        drawList.AddText(textPos, col, text);
+        drawList.AddText(textPos + new Vector2(1f, 0f), col, text);
+    }
+
+    private void RefreshTrackerIndicatorStates()
+    {
+        TrackerIndicatorState activeState = IsAutoTrackingActive ? TrackerIndicatorState.On : TrackerIndicatorState.Off;
+
+        if (trackerWinsState != TrackerIndicatorState.Error)
+            trackerWinsState = activeState;
+        if (trackerLossesState != TrackerIndicatorState.Error)
+            trackerLossesState = activeState;
+        if (trackerBlackjacksState != TrackerIndicatorState.Error)
+            trackerBlackjacksState = activeState;
+        if (trackerDoubleDownsState != TrackerIndicatorState.Error)
+            trackerDoubleDownsState = activeState;
+    }
+
+    private void ResetTrackerIndicatorStates()
+    {
+        trackerWinsState = TrackerIndicatorState.Off;
+        trackerLossesState = TrackerIndicatorState.Off;
+        trackerBlackjacksState = TrackerIndicatorState.Off;
+        trackerDoubleDownsState = TrackerIndicatorState.Off;
+        RefreshTrackerIndicatorStates();
+    }
+
+    private static string GetTrackerIndicatorText(TrackerIndicatorState state)
+    {
+        return state switch
+        {
+            TrackerIndicatorState.On => "ON",
+            TrackerIndicatorState.Error => "Erro",
+            _ => "OFF"
+        };
+    }
+
+    private static Vector4 GetTrackerIndicatorColor(TrackerIndicatorState state)
+    {
+        return state switch
+        {
+            TrackerIndicatorState.On => ProfitColor,
+            TrackerIndicatorState.Error => LossColor,
+            _ => LossColor
+        };
+    }
+
     private void DrawMessageSection()
 
     {
@@ -765,25 +1047,201 @@ public class MainWindow : Window, IDisposable
         ImGui.EndDisabled();
     }
 
+
+    private string GetCurrentHistoryTitle() => IsPlayerMode ? "★ Player History" : "★ Dealer History";
+
+    private string GetHistoryDateGroupKey(string dateText) => $"{(IsPlayerMode ? "Player" : "Dealer")}::{dateText}";
+
+    private bool IsHistoryDateGroupCollapsed(string dateText) => collapsedHistoryDateGroups.Contains(GetHistoryDateGroupKey(dateText));
+
+    private void ToggleHistoryDateGroup(string dateText)
+    {
+        string key = GetHistoryDateGroupKey(dateText);
+        if (!collapsedHistoryDateGroups.Add(key))
+            collapsedHistoryDateGroups.Remove(key);
+    }
+
+    private void DrawHistoryGroupHeader(string dateText, int columnCount)
+    {
+        bool collapsed = IsHistoryDateGroupCollapsed(dateText);
+        string arrow = collapsed ? "▶" : "▼";
+
+        ImGui.TableNextRow();
+        ImGui.TableSetColumnIndex(0);
+
+        ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+        if (ImGui.Selectable($"{arrow}  {dateText}", false, ImGuiSelectableFlags.SpanAllColumns))
+            ToggleHistoryDateGroup(dateText);
+        ImGui.PopStyleColor();
+
+        for (int i = 1; i < columnCount; i++)
+        {
+            ImGui.TableSetColumnIndex(i);
+            ImGui.TextUnformatted(string.Empty);
+        }
+    }
+
+    private string GetHistoryExportDirectory()
+    {
+        string configured = Plugin.Configuration.HistoryExportDirectory?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))
+            return configured;
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+    }
+
+    private void DrawHistoryExportDirectoryPopup(Vector2 buttonMin)
+    {
+        const string popupId = "##HistoryExportDirectoryPopupInline";
+        const float popupWidth = 520f;
+
+        ImGui.SetNextWindowPos(new Vector2(buttonMin.X - popupWidth - 6f, buttonMin.Y), ImGuiCond.Appearing);
+        ImGui.SetNextWindowSize(new Vector2(popupWidth, 0f), ImGuiCond.Appearing);
+
+        if (ImGui.BeginPopup(popupId))
+        {
+            ImGui.TextUnformatted("Choose where TXT/CSV history exports will be saved.");
+            ImGui.Spacing();
+
+            if (string.IsNullOrWhiteSpace(historyExportDirectoryInput))
+                historyExportDirectoryInput = Plugin.Configuration.HistoryExportDirectory ?? string.Empty;
+
+            ImGui.SetNextItemWidth(popupWidth - 32f);
+            if (ImGui.InputText("##HistoryExportDirectoryInput", ref historyExportDirectoryInput, 512))
+            {
+                Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
+                Plugin.Configuration.Save();
+            }
+
+            if (ImGui.Button("Use Desktop"))
+            {
+                historyExportDirectoryInput = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+                Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
+                Plugin.Configuration.Save();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Use Documents"))
+            {
+                historyExportDirectoryInput = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+                Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
+                Plugin.Configuration.Save();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Use Backup Folder"))
+            {
+                historyExportDirectoryInput = Plugin.Configuration.DealerBackupDirectory ?? string.Empty;
+                Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
+                Plugin.Configuration.Save();
+            }
+
+            ImGui.SameLine();
+            if (ImGui.Button("Clear"))
+            {
+                historyExportDirectoryInput = string.Empty;
+                Plugin.Configuration.HistoryExportDirectory = string.Empty;
+                Plugin.Configuration.Save();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void ExportCurrentHistory(bool asCsv)
+    {
+        ExportCurrentHistory(asCsv, false, IsPlayerMode ? "PlayerHistory" : "DealerHistory");
+    }
+
+    private void ExportCurrentHistory(bool asCsv, bool isAutoBackup, string filePrefix)
+    {
+        try
+        {
+            var entries = GetSortedHistory();
+            string outputDirectory = isAutoBackup ? GetDealerBackupDirectory() : GetHistoryExportDirectory();
+            if (!Directory.Exists(outputDirectory))
+                Directory.CreateDirectory(outputDirectory);
+
+            string extension = asCsv ? "xls" : "txt";
+            string safePrefix = string.IsNullOrWhiteSpace(filePrefix) ? (IsPlayerMode ? "PlayerHistory" : "DealerHistory") : filePrefix;
+            string fileName = $"GambaBank_{safePrefix}_{DateTime.Now:yyyyMMdd_HHmmss}.{extension}";
+            string filePath = Path.Combine(outputDirectory, fileName);
+
+            if (asCsv)
+                File.WriteAllText(filePath, BuildDealerSpreadsheetXml(entries), Encoding.UTF8);
+            else
+                File.WriteAllText(filePath, BuildDealerTxt(entries), Encoding.UTF8);
+
+            dealerExportStatusText = isAutoBackup ? "Backup exported:" : "Exported:";
+            dealerExportDirectoryPath = outputDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
+            dealerExportFileName = fileName;
+            dealerExportFilePath = filePath;
+            dealerExportFailed = false;
+            dealerExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+        }
+        catch
+        {
+            dealerExportStatusText = isAutoBackup ? "Backup export failed" : "Export failed";
+            dealerExportDirectoryPath = string.Empty;
+            dealerExportFileName = string.Empty;
+            dealerExportFilePath = string.Empty;
+            dealerExportFailed = true;
+            dealerExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+        }
+    }
+
     private void DrawHistorySection()
     {
         ImGui.PushStyleColor(ImGuiCol.Text, Hex("#ffbb00"));
-        ImGui.Text(IsPlayerMode ? "★ Player History" : "★ Dealer History");
+        ImGui.Text(GetCurrentHistoryTitle());
         ImGui.PopStyleColor();
+
+        ImGui.SameLine();
+        AlignTopRightControls(32f + 84f + 84f + (ImGui.GetStyle().ItemSpacing.X * 3f));
+
+        if (DrawExportDirectoryIconButton("HistoryExportDirectoryButton", new Vector2(32f, ImGui.GetTextLineHeight() + 2f), UtilityButtonColor))
+        {
+            historyExportDirectoryInput = Plugin.Configuration.HistoryExportDirectory ?? string.Empty;
+            ImGui.OpenPopup("##HistoryExportDirectoryPopupInline");
+        }
+        Vector2 historyExportButtonMin = ImGui.GetItemRectMin();
+        DrawHistoryExportDirectoryPopup(historyExportButtonMin);
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Export TXT", IsPlayerMode ? "PlayerExportTxtButton" : "DealerExportTxtButton", new Vector2(84f, ImGui.GetTextLineHeight() + 2f), Hex("#DA9E00"), WhiteText))
+            ExportCurrentHistory(false);
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Export CSV", IsPlayerMode ? "PlayerExportCsvButton" : "DealerExportCsvButton", new Vector2(84f, ImGui.GetTextLineHeight() + 2f), DealerExportCsvColor, WhiteText))
+            ExportCurrentHistory(true);
+
         ImGui.Spacing();
+
+        if (IsDealerMode)
+        {
+            DrawDealerPeriodSummary();
+            ImGui.Spacing();
+        }
 
         ImGui.Text("Sort by:");
         ImGui.SameLine();
 
-        ImGui.SetNextItemWidth(150f);
-        if (ImGui.BeginCombo("##SortBy", sortBy))
+        ImGui.SetNextItemWidth(220f);
+        string sortPreview = IsDealerMode ? GetDealerSortComboPreviewText() : sortBy;
+        if (ImGui.BeginCombo("##SortBy", sortPreview))
         {
             DrawSortOption("Most recent");
             DrawSortOption("Ascending");
             DrawSortOption("Results");
 
             if (IsDealerMode)
+            {
                 DrawSortOption("Tips");
+                DrawDealerSortAndFilterOptions();
+            }
+
+            if (IsPlayerMode)
+                DrawSortOption("Blackjack");
 
             ImGui.EndCombo();
         }
@@ -809,6 +1267,30 @@ public class MainWindow : Window, IDisposable
         ImGui.SameLine();
         DrawProfitsLossesSummary();
 
+        if (DateTime.UtcNow < dealerExportStatusUntilUtc && !string.IsNullOrWhiteSpace(dealerExportStatusText))
+        {
+            ImGui.Spacing();
+            if (dealerExportFailed || string.IsNullOrWhiteSpace(dealerExportDirectoryPath) || string.IsNullOrWhiteSpace(dealerExportFileName))
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+                ImGui.TextUnformatted(dealerExportStatusText);
+                ImGui.PopStyleColor();
+            }
+            else
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+                ImGui.TextUnformatted(dealerExportStatusText);
+                ImGui.PopStyleColor();
+
+                ImGui.SameLine(0f, 4f);
+                DrawClickableInlineText(dealerExportDirectoryPath, ProfitColor, OpenExportDirectory, false, "Click to open folder");
+
+                ImGui.SameLine(0f, 0f);
+                DrawClickableInlineText(dealerExportFileName, WhiteText, OpenExportDirectory, false, "Click to open folder");
+            }
+        }
+
+
         var sortedHistory = GetSortedHistory();
         int columnCount = IsPlayerMode ? 5 : 6;
 
@@ -832,15 +1314,30 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("Results", ImGuiTableColumnFlags.WidthFixed, 200f);
         ImGui.TableHeadersRow();
 
+        string? currentDateGroup = null;
+        int rowIndex = 0;
+
         foreach (var entry in sortedHistory)
         {
+            string entryDate = ParseTimestamp(entry.Timestamp).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+            if (!string.Equals(currentDateGroup, entryDate, StringComparison.OrdinalIgnoreCase))
+            {
+                currentDateGroup = entryDate;
+                DrawHistoryGroupHeader(entryDate, columnCount);
+            }
+
+            if (IsHistoryDateGroupCollapsed(entryDate))
+                continue;
+
             ImGui.TableNextRow();
+            rowIndex++;
 
             ImGui.TableSetColumnIndex(0);
             DrawColoredCell(entry.House, NeutralColor);
 
             ImGui.TableSetColumnIndex(1);
-            DrawColoredCell(entry.Timestamp, GoldColor);
+            DrawHistoryEntryLink(entry, rowIndex);
 
             ImGui.TableSetColumnIndex(2);
             DrawColoredCell(entry.StartingBank, GoldColor);
@@ -858,7 +1355,6 @@ public class MainWindow : Window, IDisposable
             {
                 ImGui.TableSetColumnIndex(4);
                 DrawColoredCell(entry.Tips, NeutralColor);
-
                 ImGui.TableSetColumnIndex(5);
             }
             else
@@ -866,18 +1362,25 @@ public class MainWindow : Window, IDisposable
                 ImGui.TableSetColumnIndex(4);
             }
 
-            bool isBlackjackResult = entry.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase);
-            bool isDoubleDownResult = entry.Result.Contains("Double-Down", StringComparison.OrdinalIgnoreCase);
-            var resultColor = isBlackjackResult
-                ? BlackjackColor
-                : ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
-
-            if (isDoubleDownResult)
-                DrawDoubleDownColoredCell(entry.Result);
-            else if (isBlackjackResult)
-                DrawBoldColoredCell(entry.Result, resultColor);
+            if (IsCheckpointEntry(entry))
+                DrawCheckpointResultCell(entry.Result);
+            else if (entry.Result.Contains("Backup", StringComparison.OrdinalIgnoreCase))
+                DrawBoldColoredCell("Backup", GoldColor);
             else
-                DrawColoredCell(entry.Result, resultColor);
+            {
+                bool isBlackjackResult = entry.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase);
+                bool isDoubleDownResult = entry.Result.Contains("Double-Down", StringComparison.OrdinalIgnoreCase);
+                var resultColor = isBlackjackResult
+                    ? BlackjackColor
+                    : ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
+
+                if (isDoubleDownResult)
+                    DrawDoubleDownColoredCell(entry.Result);
+                else if (isBlackjackResult)
+                    DrawBoldColoredCell(entry.Result, resultColor);
+                else
+                    DrawColoredCell(entry.Result, resultColor);
+            }
         }
 
         ImGui.EndTable();
@@ -1022,6 +1525,74 @@ public class MainWindow : Window, IDisposable
 
         bool confirmedByEnter = ImGui.InputText(inputId, ref inputText, 128, ImGuiInputTextFlags.EnterReturnsTrue);
         bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+
+        if (confirmedByEnter || confirmedByFocusLoss)
+            SaveCurrentProfileValues();
+    }
+
+    private void DrawEditableHouseSuggestCell(
+        int labelColumn,
+        int valueColumn,
+        string label,
+        string inputId,
+        ref string inputText,
+        float valueWidth)
+    {
+        ImGui.TableSetColumnIndex(labelColumn);
+        ImGui.AlignTextToFramePadding();
+        ImGui.Text(label);
+
+        ImGui.TableSetColumnIndex(valueColumn);
+        ImGui.SetNextItemWidth(valueWidth);
+
+        bool confirmedByEnter = ImGui.InputText(inputId, ref inputText, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+        bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+        bool isActive = ImGui.IsItemActive();
+        bool isFocused = ImGui.IsItemFocused();
+        Vector2 inputMin = ImGui.GetItemRectMin();
+        Vector2 inputMax = ImGui.GetItemRectMax();
+
+        string searchText = inputText?.Trim() ?? string.Empty;
+        var allSuggestions = GetDealerHousePresets();
+        var suggestions = string.IsNullOrWhiteSpace(searchText)
+            ? allSuggestions.Take(8).ToList()
+            : allSuggestions.Where(x => x.Contains(searchText, StringComparison.OrdinalIgnoreCase)).Take(8).ToList();
+
+        float popupHeight = MathF.Min(8, Math.Max(1, suggestions.Count)) * (ImGui.GetTextLineHeightWithSpacing() + 2f) + 10f;
+        Vector2 popupMin = new(inputMin.X, inputMax.Y + 2f);
+        Vector2 popupMax = new(inputMin.X + MathF.Max(valueWidth, inputMax.X - inputMin.X), inputMax.Y + 2f + popupHeight);
+        bool hoveringPopupArea = ImGui.IsMouseHoveringRect(popupMin, popupMax, true);
+
+        bool shouldShowSuggestions = suggestions.Count > 0 && (isActive || isFocused || hoveringPopupArea);
+
+        if (shouldShowSuggestions)
+        {
+            ImGui.SetNextWindowPos(popupMin, ImGuiCond.Always);
+            ImGui.SetNextWindowSize(new Vector2(popupMax.X - popupMin.X, popupHeight), ImGuiCond.Always);
+
+            ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, new Vector2(4f, 4f));
+            if (ImGui.Begin(
+                    $"{inputId}SuggestionsWindow",
+                    ImGuiWindowFlags.NoTitleBar |
+                    ImGuiWindowFlags.NoResize |
+                    ImGuiWindowFlags.NoMove |
+                    ImGuiWindowFlags.NoSavedSettings |
+                    ImGuiWindowFlags.NoFocusOnAppearing |
+                    ImGuiWindowFlags.NoNavFocus))
+            {
+                foreach (string suggestion in suggestions)
+                {
+                    if (ImGui.Selectable(suggestion, false))
+                    {
+                        inputText = suggestion;
+                        SaveCurrentProfileValues();
+                    }
+                }
+            }
+
+            ImGui.End();
+            ImGui.PopStyleVar();
+        }
 
         if (confirmedByEnter || confirmedByFocusLoss)
             SaveCurrentProfileValues();
@@ -1382,6 +1953,79 @@ public class MainWindow : Window, IDisposable
     }
 
 
+    private bool DrawExportDirectoryIconButton(string id, Vector2 size, Vector4 baseColor)
+    {
+        Vector2 actualSize = size;
+        if (actualSize.X <= 0f)
+            actualSize.X = 32f;
+        if (actualSize.Y <= 0f)
+            actualSize.Y = ImGui.GetFrameHeight();
+
+        Vector4 hoverColor = Lighten(baseColor, 0.18f);
+        Vector4 activeColor = Lighten(baseColor, 0.08f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, baseColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hoverColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, activeColor);
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 0f));
+
+        bool pressed = ImGui.Button($"##{id}", actualSize);
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        Vector2 center = new((min.X + max.X) * 0.5f, (min.Y + max.Y) * 0.5f);
+
+        var drawList = ImGui.GetWindowDrawList();
+        uint iconColor = ImGui.ColorConvertFloat4ToU32(WhiteText);
+
+        float trayHalfWidth = MathF.Min(8f, (max.X - min.X) * 0.24f);
+        float trayHeight = MathF.Min(5f, (max.Y - min.Y) * 0.18f);
+        float trayY = center.Y + 5f;
+
+        drawList.AddLine(
+            new Vector2(center.X - trayHalfWidth, trayY),
+            new Vector2(center.X + trayHalfWidth, trayY),
+            iconColor,
+            2f);
+
+        drawList.AddLine(
+            new Vector2(center.X - trayHalfWidth, trayY),
+            new Vector2(center.X - trayHalfWidth, trayY - trayHeight),
+            iconColor,
+            2f);
+
+        drawList.AddLine(
+            new Vector2(center.X + trayHalfWidth, trayY),
+            new Vector2(center.X + trayHalfWidth, trayY - trayHeight),
+            iconColor,
+            2f);
+
+        float arrowTopY = center.Y - 7f;
+        float arrowBottomY = center.Y + 1f;
+
+        drawList.AddLine(
+            new Vector2(center.X, arrowBottomY),
+            new Vector2(center.X, arrowTopY + 3f),
+            iconColor,
+            2.3f);
+
+        drawList.AddLine(
+            new Vector2(center.X, arrowTopY),
+            new Vector2(center.X - 4f, arrowTopY + 4f),
+            iconColor,
+            2.3f);
+
+        drawList.AddLine(
+            new Vector2(center.X, arrowTopY),
+            new Vector2(center.X + 4f, arrowTopY + 4f),
+            iconColor,
+            2.3f);
+
+        ImGui.PopStyleColor(4);
+        return pressed;
+    }
+
+
     private bool DrawGradientStyledBoldButton(
         string text,
         string id,
@@ -1578,6 +2222,11 @@ public class MainWindow : Window, IDisposable
             color.W);
     }
 
+    private static Vector4 WithAlpha(Vector4 color, float alpha)
+    {
+        return new Vector4(color.X, color.Y, color.Z, Math.Clamp(alpha, 0f, 1f));
+    }
+
     private static Vector4 Darken(Vector4 color, float amount)
     {
         return new Vector4(
@@ -1600,6 +2249,28 @@ public class MainWindow : Window, IDisposable
     private List<HistoryEntry> GetSortedHistory()
     {
         IEnumerable<HistoryEntry> history = GetCurrentHistory();
+
+        if (IsDealerMode)
+        {
+            if (!string.Equals(dealerHouseFilter, "All", StringComparison.OrdinalIgnoreCase))
+                history = history.Where(entry => string.Equals(entry.House, dealerHouseFilter, StringComparison.OrdinalIgnoreCase));
+
+            history = dealerResultFilter switch
+            {
+                "Profit only" => history.Where(entry => !IsCheckpointEntry(entry) && ParseSignedFormatted(entry.Result) > BigInteger.Zero),
+                "Loss only" => history.Where(entry => !IsCheckpointEntry(entry) && ParseSignedFormatted(entry.Result) < BigInteger.Zero),
+                "Has Tips" => history.Where(entry => ParseBankValue(entry.Tips) > BigInteger.Zero),
+                _ => history
+            };
+
+            history = dealerDateFilter switch
+            {
+                "Today" => history.Where(entry => ParseTimestamp(entry.Timestamp).Date == DateTime.Today),
+                "This Week" => history.Where(entry => ParseTimestamp(entry.Timestamp) >= DateTime.Today.AddDays(-6)),
+                "This Month" => history.Where(entry => ParseTimestamp(entry.Timestamp).Year == DateTime.Today.Year && ParseTimestamp(entry.Timestamp).Month == DateTime.Today.Month),
+                _ => history
+            };
+        }
 
         if (!string.IsNullOrWhiteSpace(searchInput))
         {
@@ -1693,6 +2364,7 @@ public class MainWindow : Window, IDisposable
             lastPlayerBankChangeValue = BigInteger.Zero;
             betInputHasUserEdited = ParseBankValue(profile.PlayerBetInput ?? string.Empty) > BigInteger.Zero;
             bankingInputHasUserEdited = false;
+            ResetTrackerIndicatorStates();
             return;
         }
 
@@ -1716,6 +2388,7 @@ public class MainWindow : Window, IDisposable
         bankingInput = string.Empty;
         betInputHasUserEdited = false;
         bankingInputHasUserEdited = false;
+        ResetTrackerIndicatorStates();
     }
 
 
@@ -1786,6 +2459,7 @@ public class MainWindow : Window, IDisposable
 
         currentBetDisplayOverrideUntilUtc = DateTime.MinValue;
         currentBetDisplayOverrideText = string.Empty;
+        ResetTrackerIndicatorStates();
         SaveCurrentProfileValues();
     }
 
@@ -1988,58 +2662,72 @@ public class MainWindow : Window, IDisposable
         }
 
         trackedDealerInput = StripWorldSuffix(targetName);
+        ResetTrackerIndicatorStates();
         SaveCurrentProfileValues();
     }
 
     private void OnChatMessage(XivChatType type, int timestamp, ref SeString sender, ref SeString message, ref bool isHandled)
     {
-        if (!IsAutoTrackingActive)
-            return;
-
-        if (type != XivChatType.Party && type != XivChatType.CrossParty)
-            return;
-
-        string trackedDealer = NormalizeLooseText(trackedDealerInput);
-        if (string.IsNullOrWhiteSpace(trackedDealer))
-            return;
-
-        string senderName = NormalizeLooseText(StripWorldSuffix(sender.TextValue ?? string.Empty));
-        string localPlayerName = NormalizeLooseText(Plugin.PlayerState.CharacterName ?? string.Empty);
-        if (string.IsNullOrWhiteSpace(localPlayerName))
-            return;
-
-        string messageText = message.TextValue?.Replace('\n', ' ').Replace('\r', ' ').Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(messageText))
-            return;
-
-        bool senderIsTrackedDealer = NamesRoughlyMatch(senderName, trackedDealer);
-        bool senderIsLocalPlayer = NamesRoughlyMatch(senderName, localPlayerName);
-
-        if (senderIsTrackedDealer && MessageStartsWithTrackedPlayer(messageText, localPlayerName))
-            doubleDownPromptUntilUtc = DateTime.UtcNow.AddSeconds(20);
-
-        if (senderIsLocalPlayer && DateTime.UtcNow < doubleDownPromptUntilUtc && IsDoubleDownCallMessage(messageText))
+        try
         {
-            doubleDownPromptUntilUtc = DateTime.MinValue;
-            doubleDownPendingUntilUtc = DateTime.UtcNow.AddSeconds(35);
-            return;
+            if (!IsAutoTrackingActive)
+                return;
+
+            if (type != XivChatType.Party && type != XivChatType.CrossParty)
+                return;
+
+            string trackedDealer = NormalizeLooseText(trackedDealerInput);
+            if (string.IsNullOrWhiteSpace(trackedDealer))
+                return;
+
+            string senderName = NormalizeLooseText(StripWorldSuffix(sender.TextValue ?? string.Empty));
+            string localPlayerName = NormalizeLooseText(Plugin.PlayerState.CharacterName ?? string.Empty);
+            if (string.IsNullOrWhiteSpace(localPlayerName))
+                return;
+
+            string messageText = message.TextValue?.Replace('\n', ' ').Replace('\r', ' ').Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(messageText))
+                return;
+
+            bool senderIsTrackedDealer = NamesRoughlyMatch(senderName, trackedDealer);
+            bool senderIsLocalPlayer = NamesRoughlyMatch(senderName, localPlayerName);
+
+            if (senderIsTrackedDealer && MessageStartsWithTrackedPlayer(messageText, localPlayerName))
+                doubleDownPromptUntilUtc = DateTime.UtcNow.AddSeconds(20);
+
+            if (senderIsLocalPlayer && DateTime.UtcNow < doubleDownPromptUntilUtc && IsDoubleDownCallMessage(messageText))
+            {
+                doubleDownPromptUntilUtc = DateTime.MinValue;
+                doubleDownPendingUntilUtc = DateTime.UtcNow.AddSeconds(35);
+                return;
+            }
+
+            if (!senderIsTrackedDealer)
+                return;
+
+            if (!TryGetTrackedOutcomeCounts(messageText, localPlayerName, out int winCount, out int lossCount, out int pushCount))
+                return;
+
+            if (DateTime.UtcNow < doubleDownPendingUntilUtc)
+            {
+                ApplyTrackedDoubleDownOutcome(winCount, lossCount, pushCount);
+                doubleDownPendingUntilUtc = DateTime.MinValue;
+                doubleDownPromptUntilUtc = DateTime.MinValue;
+                return;
+            }
+
+            ApplyTrackedChatOutcome(winCount, lossCount, pushCount);
         }
-
-        if (!senderIsTrackedDealer)
-            return;
-
-        if (!TryGetTrackedOutcomeCounts(messageText, localPlayerName, out int winCount, out int lossCount, out int pushCount))
-            return;
-
-        if (DateTime.UtcNow < doubleDownPendingUntilUtc)
+        catch
         {
-            ApplyTrackedDoubleDownOutcome(winCount, lossCount, pushCount);
-            doubleDownPendingUntilUtc = DateTime.MinValue;
-            doubleDownPromptUntilUtc = DateTime.MinValue;
-            return;
+            if (DateTime.UtcNow < doubleDownPendingUntilUtc)
+                trackerDoubleDownsState = TrackerIndicatorState.Error;
+            else
+            {
+                trackerWinsState = TrackerIndicatorState.Error;
+                trackerLossesState = TrackerIndicatorState.Error;
+            }
         }
-
-        ApplyTrackedChatOutcome(winCount, lossCount, pushCount);
     }
 
     private bool TryGetTrackedOutcomeCounts(string messageText, string localPlayerName, out int winCount, out int lossCount, out int pushCount)
@@ -2078,52 +2766,60 @@ public class MainWindow : Window, IDisposable
 
     private void ApplyTrackedDoubleDownOutcome(int winCount, int lossCount, int pushCount)
     {
-        betValue = ParseBankValue(betInput);
-        betInput = FormatNumber(betValue);
-
-        if (betValue <= BigInteger.Zero)
+        try
         {
+            betValue = ParseBankValue(betInput);
+            betInput = FormatNumber(betValue);
+
+            if (betValue <= BigInteger.Zero)
+            {
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+                finalBankValue = startingBankValue;
+
+            BigInteger oldCurrentBankValue = finalBankValue;
+            int netCount = winCount - lossCount;
+            bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
+            bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
+            bool isPushed = isPurePush || isBalancedPush;
+
+            BigInteger doubleDownUnit = betValue * 2;
+
+            if (netCount > 0)
+                finalBankValue += doubleDownUnit * netCount;
+            else if (netCount < 0)
+                finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - (doubleDownUnit * BigInteger.Abs(netCount)));
+
+            finalBankInput = FormatNumber(finalBankValue);
+
+            if (isPushed)
+            {
+                lastPlayerBankChangeValue = BigInteger.Zero;
+                AddTrackedHistoryEntry("+Pushed Double-Down");
+                SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+            lastPlayerBankChangeValue = trackedResultValue;
+            AddTrackedHistoryEntry($"{FormatSignedResult(trackedResultValue)} Double-Down");
+
+            if (trackedResultValue > BigInteger.Zero)
+                SetTemporaryCurrentBetDisplay("You won!", ProfitColor, 5);
+            else if (trackedResultValue < BigInteger.Zero)
+                SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
+
             SaveCurrentProfileValues();
-            return;
         }
-
-        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
-            finalBankValue = startingBankValue;
-
-        BigInteger oldCurrentBankValue = finalBankValue;
-        int netCount = winCount - lossCount;
-        bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
-        bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
-        bool isPushed = isPurePush || isBalancedPush;
-
-        BigInteger doubleDownUnit = betValue * 2;
-
-        if (netCount > 0)
-            finalBankValue += doubleDownUnit * netCount;
-        else if (netCount < 0)
-            finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - (doubleDownUnit * BigInteger.Abs(netCount)));
-
-        finalBankInput = FormatNumber(finalBankValue);
-
-        if (isPushed)
+        catch
         {
-            lastPlayerBankChangeValue = BigInteger.Zero;
-            AddTrackedHistoryEntry("+Pushed Double-Down");
-            SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
-            SaveCurrentProfileValues();
-            return;
+            trackerDoubleDownsState = TrackerIndicatorState.Error;
+            throw;
         }
-
-        BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
-        lastPlayerBankChangeValue = trackedResultValue;
-        AddTrackedHistoryEntry($"{FormatSignedResult(trackedResultValue)} Double-Down");
-
-        if (trackedResultValue > BigInteger.Zero)
-            SetTemporaryCurrentBetDisplay("You won!", ProfitColor, 5);
-        else if (trackedResultValue < BigInteger.Zero)
-            SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
-
-        SaveCurrentProfileValues();
     }
 
     private static bool MessageStartsWithTrackedPlayer(string messageText, string normalizedPlayerName)
@@ -2190,50 +2886,61 @@ public class MainWindow : Window, IDisposable
 
     private void ApplyTrackedChatOutcome(int winCount, int lossCount, int pushCount)
     {
-        betValue = ParseBankValue(betInput);
-        betInput = FormatNumber(betValue);
-
-        if (betValue <= BigInteger.Zero)
+        try
         {
+            betValue = ParseBankValue(betInput);
+            betInput = FormatNumber(betValue);
+
+            if (betValue <= BigInteger.Zero)
+            {
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+                finalBankValue = startingBankValue;
+
+            BigInteger oldCurrentBankValue = finalBankValue;
+            int netCount = winCount - lossCount;
+            bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
+            bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
+            bool isPushed = isPurePush || isBalancedPush;
+
+            if (netCount > 0)
+                finalBankValue += betValue * netCount;
+            else if (netCount < 0)
+                finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - (betValue * BigInteger.Abs(netCount)));
+
+            finalBankInput = FormatNumber(finalBankValue);
+
+            if (isPushed)
+            {
+                lastPlayerBankChangeValue = BigInteger.Zero;
+                AddTrackedHistoryEntry("Pushed");
+                SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+            lastPlayerBankChangeValue = trackedResultValue;
+            AddTrackedHistoryEntry(FormatSignedResult(trackedResultValue));
+
+            if (trackedResultValue > BigInteger.Zero)
+                SetTemporaryCurrentBetDisplay("You won!", ProfitColor, 5);
+            else if (trackedResultValue < BigInteger.Zero)
+                SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
+
             SaveCurrentProfileValues();
-            return;
         }
-
-        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
-            finalBankValue = startingBankValue;
-
-        BigInteger oldCurrentBankValue = finalBankValue;
-        int netCount = winCount - lossCount;
-        bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
-        bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
-        bool isPushed = isPurePush || isBalancedPush;
-
-        if (netCount > 0)
-            finalBankValue += betValue * netCount;
-        else if (netCount < 0)
-            finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - (betValue * BigInteger.Abs(netCount)));
-
-        finalBankInput = FormatNumber(finalBankValue);
-
-        if (isPushed)
+        catch
         {
-            lastPlayerBankChangeValue = BigInteger.Zero;
-            AddTrackedHistoryEntry("Pushed");
-            SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
-            SaveCurrentProfileValues();
-            return;
+            if (winCount > 0)
+                trackerWinsState = TrackerIndicatorState.Error;
+            if (lossCount > 0 || pushCount > 0)
+                trackerLossesState = TrackerIndicatorState.Error;
+            throw;
         }
-
-        BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
-        lastPlayerBankChangeValue = trackedResultValue;
-        AddTrackedHistoryEntry(FormatSignedResult(trackedResultValue));
-
-        if (trackedResultValue > BigInteger.Zero)
-            SetTemporaryCurrentBetDisplay("You won!", ProfitColor, 5);
-        else if (trackedResultValue < BigInteger.Zero)
-            SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
-
-        SaveCurrentProfileValues();
     }
 
     private void AddTrackedHistoryEntry(string resultText)
@@ -2531,5 +3238,756 @@ public class MainWindow : Window, IDisposable
         float g = Convert.ToInt32(hex.Substring(2, 2), 16) / 255f;
         float b = Convert.ToInt32(hex.Substring(4, 2), 16) / 255f;
         return new Vector4(r, g, b, 1f);
+    }
+
+
+    private void DrawDealerSessionStatusSection()
+    {
+        string currentHouse = string.IsNullOrWhiteSpace(houseInput) ? "Not set" : houseInput.Trim();
+        string checkpointState = GetDealerCheckpointState();
+        DateTime? shiftStart = TryGetCurrentDealerShiftStart();
+        string shiftStartText = shiftStart.HasValue ? shiftStart.Value.ToString("yyyy-MM-dd HH:mm") : "--";
+        string elapsedText = shiftStart.HasValue ? FormatElapsed(DateTime.Now - shiftStart.Value) : "--";
+
+        Vector4 statusColor = GoldColor;
+        if (string.Equals(checkpointState, "No Shift", StringComparison.OrdinalIgnoreCase))
+            statusColor = LossColor;
+        else if (string.Equals(checkpointState, "Ended", StringComparison.OrdinalIgnoreCase))
+            statusColor = LossColor;
+        else if (string.Equals(checkpointState, "Active", StringComparison.OrdinalIgnoreCase))
+            statusColor = ProfitColor;
+        else if (string.Equals(checkpointState, "On Break", StringComparison.OrdinalIgnoreCase))
+            statusColor = Hex("#00B3D8");
+
+        ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+        ImGui.TextUnformatted("♯ Current Dealer Session");
+        ImGui.PopStyleColor();
+
+        ImGui.TextUnformatted($"House: {currentHouse} | ");
+        ImGui.SameLine(0f, 0f);
+        ImGui.TextUnformatted("Status:");
+        ImGui.SameLine(0f, 4f);
+        DrawColoredInlineText(checkpointState, statusColor);
+        ImGui.SameLine(0f, 0f);
+        ImGui.TextUnformatted($" | Started: {shiftStartText} | Elapsed: {elapsedText}");
+    }
+
+    private void DrawDealerCheckpointButtons()
+    {
+        bool isOnBreak = string.Equals(GetDealerCheckpointState(), "On Break", StringComparison.OrdinalIgnoreCase);
+        bool hasActiveShift = TryGetCurrentDealerShiftStart().HasValue;
+
+        if (DrawStyledBoldButton("Start Shift", "DealerStartShiftButton", new Vector2(92f, 0f), DealerButtonColor))
+            AddDealerCheckpoint("Start Shift");
+
+        ImGui.SameLine();
+        if (!hasActiveShift || isOnBreak)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("Break", "DealerBreakButton", new Vector2(70f, 0f), DealerBreakColor, WhiteText))
+            AddDealerCheckpoint("Break");
+        if (!hasActiveShift || isOnBreak)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (!hasActiveShift || !isOnBreak)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("Resume", "DealerResumeButton", new Vector2(78f, 0f), DealerResumeColor, WhiteText))
+            AddDealerCheckpoint("Resume");
+        if (!hasActiveShift || !isOnBreak)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (!hasActiveShift)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("End Shift", "DealerEndShiftButton", new Vector2(90f, 0f), LossButtonColor, WhiteText))
+            AddDealerCheckpoint("End Shift");
+        if (!hasActiveShift)
+            ImGui.EndDisabled();
+    }
+
+    private void IncrementDealerTips(BigInteger amount)
+    {
+        tipsValue += amount;
+        tipsInput = FormatNumber(tipsValue);
+        SaveCurrentProfileValues();
+    }
+
+    private void AddDealerCheckpoint(string checkpointName)
+    {
+        var history = GetCurrentHistory();
+
+        history.Add(new HistoryEntry
+        {
+            House = houseInput.Trim(),
+            Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            StartingBank = FormatNumber(startingBankValue),
+            FinalBank = FormatNumber(finalBankValue),
+            Tips = FormatNumber(tipsValue),
+            Result = checkpointName
+        });
+
+        if (history.Count > 200)
+            history.RemoveAt(0);
+
+        Plugin.Configuration.Save();
+
+        if (string.Equals(checkpointName, "End Shift", StringComparison.OrdinalIgnoreCase) && Plugin.Configuration.DealerAutoBackupOnEndShift)
+        {
+            AddBackupHistoryEntry();
+            ExportCurrentHistory(false, true, "EndShiftBackup");
+            ExportCurrentHistory(true, true, "EndShiftBackup");
+        }
+    }
+
+
+    private void DrawDealerPeriodSummary()
+    {
+        DrawDealerSummaryLine("Today", DateTime.Today, DateTime.Now);
+        DrawDealerSummaryLine("This Week", DateTime.Today.AddDays(-6), DateTime.Now);
+        DrawDealerSummaryLine("This Month", new DateTime(DateTime.Today.Year, DateTime.Today.Month, 1), DateTime.Now);
+    }
+
+    private void DrawDealerSummaryLine(string label, DateTime fromInclusive, DateTime toInclusive)
+    {
+        var entries = GetCurrentHistory()
+            .Where(x => !IsCheckpointEntry(x))
+            .Where(x =>
+            {
+                DateTime ts = ParseTimestamp(x.Timestamp);
+                return ts >= fromInclusive && ts <= toInclusive;
+            })
+            .ToList();
+
+        BigInteger net = BigInteger.Zero;
+        BigInteger tips = BigInteger.Zero;
+        foreach (var entry in entries)
+        {
+            net += ParseSignedFormatted(entry.Result);
+            tips += ParseBankValue(entry.Tips);
+        }
+
+        Vector4 netColor = net > BigInteger.Zero ? ProfitColor : LossColor;
+        Vector4 tipsColor = tips > BigInteger.Zero ? ProfitColor : LossColor;
+
+        ImGui.TextUnformatted($"{label}:");
+        ImGui.SameLine(0f, 4f);
+        DrawColoredInlineText(FormatSignedResult(net), netColor);
+        ImGui.SameLine(0f, 8f);
+        ImGui.TextUnformatted("| Tips");
+        ImGui.SameLine(0f, 4f);
+        DrawColoredInlineText(FormatNumber(tips), tipsColor);
+        ImGui.SameLine(0f, 8f);
+        ImGui.TextUnformatted($"| Entries {entries.Count}");
+    }
+
+    private void DrawDealerSortAndFilterOptions()
+    {
+        ImGui.Separator();
+        ImGui.TextDisabled("House Filter");
+        var houseOptions = new List<string> { "All" };
+        houseOptions.AddRange(GetDealerHousePresets());
+
+        foreach (string option in houseOptions.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            bool selected = string.Equals(dealerHouseFilter, option, StringComparison.OrdinalIgnoreCase);
+            if (ImGui.Selectable($"House: {option}", selected))
+                dealerHouseFilter = option;
+
+            if (selected)
+                ImGui.SetItemDefaultFocus();
+        }
+
+        ImGui.Separator();
+        ImGui.TextDisabled("Result Filter");
+        foreach (string option in new[] { "All", "Profit only", "Loss only", "Has Tips" })
+        {
+            bool selected = string.Equals(dealerResultFilter, option, StringComparison.OrdinalIgnoreCase);
+            if (ImGui.Selectable($"Result: {option}", selected))
+                dealerResultFilter = option;
+
+            if (selected)
+                ImGui.SetItemDefaultFocus();
+        }
+
+        ImGui.Separator();
+        ImGui.TextDisabled("Date Filter");
+        foreach (string option in new[] { "All", "Today", "This Week", "This Month" })
+        {
+            bool selected = string.Equals(dealerDateFilter, option, StringComparison.OrdinalIgnoreCase);
+            if (ImGui.Selectable($"Date: {option}", selected))
+                dealerDateFilter = option;
+
+            if (selected)
+                ImGui.SetItemDefaultFocus();
+        }
+    }
+
+    private string GetDealerSortComboPreviewText()
+    {
+        var parts = new List<string> { sortBy };
+
+        if (!string.Equals(dealerHouseFilter, "All", StringComparison.OrdinalIgnoreCase))
+            parts.Add($"House: {dealerHouseFilter}");
+
+        if (!string.Equals(dealerResultFilter, "All", StringComparison.OrdinalIgnoreCase))
+            parts.Add($"Result: {dealerResultFilter}");
+
+        if (!string.Equals(dealerDateFilter, "All", StringComparison.OrdinalIgnoreCase))
+            parts.Add($"Date: {dealerDateFilter}");
+
+        return string.Join(" | ", parts);
+    }
+
+    private void DrawCheckpointResultCell(string text)
+    {
+        DrawColoredCell(text, GetCheckpointResultColor(text));
+    }
+
+    private Vector4 GetCheckpointResultColor(string text)
+    {
+        if (text.Contains("Break", StringComparison.OrdinalIgnoreCase))
+            return Hex("#1628C2");
+
+        if (text.Contains("Resume", StringComparison.OrdinalIgnoreCase))
+            return Hex("#D90090");
+
+        if (text.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+            return LossColor;
+
+        return GoldColor;
+    }
+
+    private void DrawColoredInlineText(string text, Vector4 color)
+    {
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.TextUnformatted(text);
+        ImGui.PopStyleColor();
+    }
+
+    private void DrawClickableInlineText(string text, Vector4 color, Action onClick, bool underlineOnlyOnHover = false, string tooltip = "Click to open")
+    {
+        bool hovered;
+        Vector2 min;
+        Vector2 max;
+        Vector4 drawColor = color;
+
+        ImGui.PushStyleColor(ImGuiCol.Text, color);
+        ImGui.TextUnformatted(text);
+        hovered = ImGui.IsItemHovered();
+        min = ImGui.GetItemRectMin();
+        max = ImGui.GetItemRectMax();
+        ImGui.PopStyleColor();
+
+        if (hovered)
+        {
+            drawColor = Lighten(color, 0.22f);
+            uint hoverBg = ImGui.ColorConvertFloat4ToU32(new Vector4(color.X, color.Y, color.Z, 0.12f));
+            ImGui.GetWindowDrawList().AddRectFilled(
+                new Vector2(min.X - 2f, min.Y - 1f),
+                new Vector2(max.X + 2f, max.Y + 1f),
+                hoverBg,
+                3f);
+
+            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            if (!string.IsNullOrWhiteSpace(tooltip))
+            {
+                ImGui.BeginTooltip();
+                ImGui.TextUnformatted(tooltip);
+                ImGui.EndTooltip();
+            }
+        }
+
+        if (!underlineOnlyOnHover || hovered)
+        {
+            uint underlineColor = ImGui.ColorConvertFloat4ToU32(drawColor);
+            ImGui.GetWindowDrawList().AddLine(
+                new Vector2(min.X, max.Y),
+                new Vector2(max.X, max.Y),
+                underlineColor,
+                hovered ? 2f : 1f);
+        }
+
+        if (hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+            onClick();
+    }
+
+    private void OpenExportDirectory()
+    {
+        if (string.IsNullOrWhiteSpace(dealerExportFilePath))
+            return;
+
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = "explorer.exe",
+                    Arguments = $"/select,\"{dealerExportFilePath}\"",
+                    UseShellExecute = true
+                });
+            }
+            else
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = Path.GetDirectoryName(dealerExportFilePath) ?? dealerExportDirectoryPath,
+                    UseShellExecute = true
+                });
+            }
+        }
+        catch
+        {
+        }
+    }
+
+
+    private void AddBackupHistoryEntry()
+    {
+        var history = GetCurrentHistory();
+
+        history.Add(new HistoryEntry
+        {
+            House = houseInput.Trim(),
+            Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            StartingBank = FormatNumber(startingBankValue),
+            FinalBank = FormatNumber(finalBankValue),
+            Tips = IsPlayerMode ? string.Empty : FormatNumber(tipsValue),
+            Result = "Backup"
+        });
+
+        if (history.Count > 200)
+            history.RemoveAt(0);
+
+        Plugin.Configuration.Save();
+    }
+
+    private static bool IsCheckpointEntry(HistoryEntry entry)
+    {
+        return entry.Result.Equals("Start Shift", StringComparison.OrdinalIgnoreCase) ||
+               entry.Result.Equals("Break", StringComparison.OrdinalIgnoreCase) ||
+               entry.Result.Equals("Resume", StringComparison.OrdinalIgnoreCase) ||
+               entry.Result.Equals("End Shift", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private DateTime? TryGetCurrentDealerShiftStart()
+    {
+        var history = GetCurrentHistory()
+            .Where(IsCheckpointEntry)
+            .OrderBy(x => ParseTimestamp(x.Timestamp))
+            .ToList();
+
+        DateTime? currentShiftStart = null;
+
+        foreach (var entry in history)
+        {
+            if (entry.Result.Contains("Start Shift", StringComparison.OrdinalIgnoreCase))
+                currentShiftStart = ParseTimestamp(entry.Timestamp);
+            else if (entry.Result.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+                currentShiftStart = null;
+        }
+
+        return currentShiftStart;
+    }
+
+    private string GetDealerCheckpointState()
+    {
+        var latestCheckpoint = GetCurrentHistory()
+            .Where(IsCheckpointEntry)
+            .OrderByDescending(x => ParseTimestamp(x.Timestamp))
+            .FirstOrDefault();
+
+        if (latestCheckpoint == null)
+            return "No Shift";
+
+        DateTime latestTimestamp = ParseTimestamp(latestCheckpoint.Timestamp);
+
+        if (latestCheckpoint.Result.Contains("Break", StringComparison.OrdinalIgnoreCase))
+            return "On Break";
+
+        if (latestCheckpoint.Result.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+        {
+            if ((DateTime.Now - latestTimestamp).TotalSeconds >= 10)
+                return "No Shift";
+
+            return "Ended";
+        }
+
+        if (latestCheckpoint.Result.Contains("Resume", StringComparison.OrdinalIgnoreCase) ||
+            latestCheckpoint.Result.Contains("Start Shift", StringComparison.OrdinalIgnoreCase))
+            return "Active";
+
+        return "No Shift";
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        if (elapsed.TotalHours >= 1)
+            return $"{(int)elapsed.TotalHours}h {elapsed.Minutes:D2}m";
+
+        return $"{elapsed.Minutes:D2}m";
+    }
+
+    private List<string> GetDealerHousePresets()
+    {
+        return Plugin.Configuration.GetOrCreateActiveProfile().DealerHistory
+            .Select(x => x.House?.Trim() ?? string.Empty)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(x => x)
+            .ToList();
+    }
+
+    private void ExportDealerHistory(bool asCsv)
+    {
+        ExportCurrentHistory(asCsv);
+    }
+
+    private void ExportDealerHistory(bool asCsv, bool isAutoBackup, string filePrefix)
+    {
+        ExportCurrentHistory(asCsv, isAutoBackup, filePrefix);
+    }
+
+    private static string BuildDealerTxt(IEnumerable<HistoryEntry> entries)
+    {
+        var builder = new StringBuilder();
+        bool isFirst = true;
+
+        foreach (var entry in entries)
+        {
+            if (!isFirst)
+                builder.AppendLine();
+
+            builder.AppendLine($"House: {entry.House} | Time: {entry.Timestamp} | Start: {entry.StartingBank} | Final: {entry.FinalBank} | Tips: {entry.Tips} | Result: {entry.Result}");
+            isFirst = false;
+        }
+
+        return builder.ToString();
+    }
+
+    private static string BuildDealerSpreadsheetXml(IEnumerable<HistoryEntry> entries)
+    {
+        static string StyleIdForResult(string result, bool darkRow)
+        {
+            result ??= string.Empty;
+
+            if (result.Contains("Start Shift", StringComparison.OrdinalIgnoreCase))
+                return darkRow ? "resultStartDark" : "resultStartBlack";
+
+            if (result.Contains("Break", StringComparison.OrdinalIgnoreCase))
+                return darkRow ? "resultBreakDark" : "resultBreakBlack";
+
+            if (result.Contains("Resume", StringComparison.OrdinalIgnoreCase))
+                return darkRow ? "resultResumeDark" : "resultResumeBlack";
+
+            if (result.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+                return darkRow ? "resultEndDark" : "resultEndBlack";
+
+            return ParseSignedFormatted(result) > BigInteger.Zero
+                ? darkRow ? "resultPositiveDark" : "resultPositiveBlack"
+                : darkRow ? "resultNegativeDark" : "resultNegativeBlack";
+        }
+
+        static void AppendEmptyBlackCells(StringBuilder builder, int count)
+        {
+            for (int i = 0; i < count; i++)
+                builder.AppendLine("    <Cell ss:StyleID=\"baseBlack\"><Data ss:Type=\"String\"></Data></Cell>");
+        }
+
+        var entryList = entries.ToList();
+        var builder = new StringBuilder();
+        builder.AppendLine("<?xml version=\"1.0\"?>");
+        builder.AppendLine("<?mso-application progid=\"Excel.Sheet\"?>");
+        builder.AppendLine("<Workbook xmlns=\"urn:schemas-microsoft-com:office:spreadsheet\"");
+        builder.AppendLine(" xmlns:o=\"urn:schemas-microsoft-com:office:office\"");
+        builder.AppendLine(" xmlns:x=\"urn:schemas-microsoft-com:office:excel\"");
+        builder.AppendLine(" xmlns:ss=\"urn:schemas-microsoft-com:office:spreadsheet\">");
+        builder.AppendLine(" <Styles>");
+        builder.AppendLine(BuildSpreadsheetStyleXml("baseBlack", "#000000", "#FFFFFF", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("baseDark", "#1f1f1f", "#FFFFFF", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("header", "#000000", "#FFFFFF", true, true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("houseBlack", "#000000", "#FFFFFF", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("houseDark", "#1f1f1f", "#FFFFFF", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("timeBlack", "#000000", "#FFA500", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("timeDark", "#1f1f1f", "#FFA500", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("startBlack", "#000000", "#FFA500", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("startDark", "#1f1f1f", "#FFA500", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("finalBlack", "#000000", "#00FF66", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("finalDark", "#1f1f1f", "#00FF66", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("tipsBlack", "#000000", "#FFFFFF", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("tipsDark", "#1f1f1f", "#FFFFFF", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultPositiveBlack", "#000000", "#00FF66", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultPositiveDark", "#1f1f1f", "#00FF66", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultNegativeBlack", "#000000", "#FF8A8A", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultNegativeDark", "#1f1f1f", "#FF8A8A", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultStartBlack", "#000000", "#FFA500", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultStartDark", "#1f1f1f", "#FFA500", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultBreakBlack", "#000000", "#00B3D8", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultBreakDark", "#1f1f1f", "#00B3D8", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultResumeBlack", "#000000", "#D90090", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultResumeDark", "#1f1f1f", "#D90090", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultEndBlack", "#000000", "#FF8A8A", true));
+        builder.AppendLine(BuildSpreadsheetStyleXml("resultEndDark", "#1f1f1f", "#FF8A8A", true));
+        builder.AppendLine(" </Styles>");
+        builder.AppendLine(" <Worksheet ss:Name=\"Dealer History\">");
+        builder.AppendLine("  <Table ss:ExpandedColumnCount=\"26\" ss:ExpandedRowCount=\"500\" x:FullColumns=\"1\" x:FullRows=\"1\">");
+        builder.AppendLine("   <Column ss:Width=\"140\"/>");
+        builder.AppendLine("   <Column ss:Width=\"153\"/>");
+        builder.AppendLine("   <Column ss:Width=\"123\"/>");
+        builder.AppendLine("   <Column ss:Width=\"123\"/>");
+        builder.AppendLine("   <Column ss:Width=\"123\"/>");
+        builder.AppendLine("   <Column ss:Width=\"130\"/>");
+        for (int i = 0; i < 20; i++)
+            builder.AppendLine("   <Column ss:Width=\"80\"/>");
+
+        builder.AppendLine("   <Row>");
+        builder.AppendLine("    <Cell ss:StyleID=\"header\"><Data ss:Type=\"String\">House</Data></Cell>");
+        builder.AppendLine("    <Cell ss:StyleID=\"header\"><Data ss:Type=\"String\">Time</Data></Cell>");
+        builder.AppendLine("    <Cell ss:StyleID=\"header\"><Data ss:Type=\"String\">Start Bank</Data></Cell>");
+        builder.AppendLine("    <Cell ss:StyleID=\"header\"><Data ss:Type=\"String\">Final Bank</Data></Cell>");
+        builder.AppendLine("    <Cell ss:StyleID=\"header\"><Data ss:Type=\"String\">Tips</Data></Cell>");
+        builder.AppendLine("    <Cell ss:StyleID=\"header\"><Data ss:Type=\"String\">Results</Data></Cell>");
+        AppendEmptyBlackCells(builder, 20);
+        builder.AppendLine("   </Row>");
+
+        for (int rowNumber = 2; rowNumber <= 500; rowNumber++)
+        {
+            bool darkRow = rowNumber % 2 == 0;
+            string suffix = darkRow ? "Dark" : "Black";
+            HistoryEntry? entry = rowNumber - 2 < entryList.Count ? entryList[rowNumber - 2] : null;
+
+            builder.AppendLine("   <Row>");
+
+            if (entry != null)
+            {
+                builder.AppendLine($"    <Cell ss:StyleID=\"house{suffix}\"><Data ss:Type=\"String\">{EscapeXml(entry.House)}</Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"time{suffix}\"><Data ss:Type=\"String\">{EscapeXml(entry.Timestamp)}</Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"start{suffix}\"><Data ss:Type=\"String\">{EscapeXml(entry.StartingBank)}</Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"final{suffix}\"><Data ss:Type=\"String\">{EscapeXml(entry.FinalBank)}</Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"tips{suffix}\"><Data ss:Type=\"String\">{EscapeXml(entry.Tips)}</Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"{StyleIdForResult(entry.Result, darkRow)}\"><Data ss:Type=\"String\">{EscapeXml(entry.Result)}</Data></Cell>");
+            }
+            else
+            {
+                builder.AppendLine($"    <Cell ss:StyleID=\"base{suffix}\"><Data ss:Type=\"String\"></Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"base{suffix}\"><Data ss:Type=\"String\"></Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"base{suffix}\"><Data ss:Type=\"String\"></Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"base{suffix}\"><Data ss:Type=\"String\"></Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"base{suffix}\"><Data ss:Type=\"String\"></Data></Cell>");
+                builder.AppendLine($"    <Cell ss:StyleID=\"base{suffix}\"><Data ss:Type=\"String\"></Data></Cell>");
+            }
+
+            AppendEmptyBlackCells(builder, 20);
+            builder.AppendLine("   </Row>");
+        }
+
+        builder.AppendLine("  </Table>");
+        builder.AppendLine(" </Worksheet>");
+        builder.AppendLine("</Workbook>");
+        return builder.ToString();
+    }
+
+    private static string BuildSpreadsheetStyleXml(string id, string backgroundHex, string foregroundHex, bool centered, bool bold = false)
+    {
+        string alignment = centered ? "<Alignment ss:Horizontal=\"Center\" ss:Vertical=\"Center\"/>" : string.Empty;
+        string font = bold
+            ? $"<Font ss:Bold=\"1\" ss:Color=\"{foregroundHex}\"/>"
+            : $"<Font ss:Color=\"{foregroundHex}\"/>";
+
+        return
+            $"  <Style ss:ID=\"{id}\">" +
+            "<Borders>" +
+            "<Border ss:Position=\"Bottom\" ss:LineStyle=\"Continuous\" ss:Weight=\"1\" ss:Color=\"#404040\"/>" +
+            "<Border ss:Position=\"Left\" ss:LineStyle=\"Continuous\" ss:Weight=\"1\" ss:Color=\"#404040\"/>" +
+            "<Border ss:Position=\"Right\" ss:LineStyle=\"Continuous\" ss:Weight=\"1\" ss:Color=\"#404040\"/>" +
+            "<Border ss:Position=\"Top\" ss:LineStyle=\"Continuous\" ss:Weight=\"1\" ss:Color=\"#404040\"/>" +
+            "</Borders>" +
+            $"<Interior ss:Color=\"{backgroundHex}\" ss:Pattern=\"Solid\"/>" +
+            alignment +
+            font +
+            "</Style>";
+    }
+
+    private static string EscapeXml(string value)
+    {
+        value ??= string.Empty;
+        return value
+            .Replace("&", "&amp;")
+            .Replace("<", "&lt;")
+            .Replace(">", "&gt;")
+            .Replace("\"", "&quot;");
+    }
+
+    private void DrawHistoryEntryLink(HistoryEntry entry, int rowIndex)
+    {
+        string label = string.IsNullOrWhiteSpace(entry.Timestamp) ? "--" : entry.Timestamp;
+        DrawClickableInlineText(label, GoldColor, () =>
+        {
+            selectedDealerHistoryEntry = entry;
+            selectedDealerHistoryDetailId = $"detail_{rowIndex}_{entry.Timestamp}";
+            showDealerHistoryDetailWindow = true;
+        }, true, "Click to view details");
+    }
+
+    private void DrawDealerShiftSummaryWindow()
+    {
+        if (!showDealerShiftSummaryWindow)
+            return;
+
+        if (ImGui.Begin("Current Shift Summary###DealerShiftSummary", ref showDealerShiftSummaryWindow, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            var shiftEntries = GetCurrentDealerShiftEntries();
+            DateTime? shiftStart = TryGetCurrentDealerShiftStart();
+            string checkpointState = GetDealerCheckpointState();
+
+            ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+            ImGui.TextUnformatted("♯ Current Shift Summary");
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+
+            ImGui.TextUnformatted($"House: {(string.IsNullOrWhiteSpace(houseInput) ? "Not set" : houseInput.Trim())}");
+            ImGui.TextUnformatted($"Start Bank: {FormatNumber(startingBankValue)}");
+            ImGui.TextUnformatted($"Final Bank: {FormatNumber(finalBankValue)}");
+            ImGui.TextUnformatted($"Tips: {FormatNumber(tipsValue)}");
+            ImGui.TextUnformatted($"Result: {GetCurrentResultText()}");
+            ImGui.TextUnformatted($"Status: {checkpointState}");
+            ImGui.TextUnformatted($"Started: {(shiftStart.HasValue ? shiftStart.Value.ToString("yyyy-MM-dd HH:mm:ss") : "--")}");
+            ImGui.TextUnformatted($"Elapsed: {(shiftStart.HasValue ? FormatElapsed(DateTime.Now - shiftStart.Value) : "--")}");
+
+            ImGui.Spacing();
+            ImGui.Separator();
+            ImGui.Spacing();
+
+            ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+            ImGui.TextUnformatted("Shift Timeline");
+            ImGui.PopStyleColor();
+
+            if (shiftEntries.Count == 0)
+            {
+                ImGui.TextDisabled("No active shift entries.");
+            }
+            else
+            {
+                if (ImGui.BeginChild("##DealerShiftEntries", new Vector2(520f, 180f), true))
+                {
+                    foreach (var entry in shiftEntries)
+                    {
+                        ImGui.TextUnformatted($"{entry.Timestamp} | {entry.House} | {entry.Result} | Final {entry.FinalBank} | Tips {entry.Tips}");
+                    }
+                    ImGui.EndChild();
+                }
+            }
+        }
+
+        ImGui.End();
+    }
+
+    private void DrawDealerHistoryDetailWindow()
+    {
+        if (!showDealerHistoryDetailWindow || selectedDealerHistoryEntry == null)
+            return;
+
+        string windowTitle = $"History Entry Details##{selectedDealerHistoryDetailId}";
+        if (ImGui.Begin(windowTitle, ref showDealerHistoryDetailWindow, ImGuiWindowFlags.AlwaysAutoResize))
+        {
+            var entry = selectedDealerHistoryEntry;
+            string entryType = IsCheckpointEntry(entry) ? "Checkpoint" : "Session Entry";
+            string relatedShift = GetRelatedShiftLabel(entry);
+
+            ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+            ImGui.TextUnformatted("♯ Dealer History Details");
+            ImGui.PopStyleColor();
+            ImGui.Spacing();
+
+            ImGui.TextUnformatted($"Type: {entryType}");
+            ImGui.TextUnformatted($"Related Shift: {relatedShift}");
+            ImGui.TextUnformatted($"House: {entry.House}");
+            ImGui.TextUnformatted($"Time: {entry.Timestamp}");
+            ImGui.TextUnformatted($"Start Bank: {entry.StartingBank}");
+            ImGui.TextUnformatted($"Final Bank: {entry.FinalBank}");
+            ImGui.TextUnformatted($"Tips: {entry.Tips}");
+            ImGui.TextUnformatted($"Result: {entry.Result}");
+        }
+
+        ImGui.End();
+
+        if (!showDealerHistoryDetailWindow)
+        {
+            selectedDealerHistoryEntry = null;
+            selectedDealerHistoryDetailId = string.Empty;
+        }
+    }
+
+    private string GetRelatedShiftLabel(HistoryEntry entry)
+    {
+        var timestamp = ParseTimestamp(entry.Timestamp);
+        var history = GetCurrentHistory()
+            .Where(IsCheckpointEntry)
+            .OrderBy(x => ParseTimestamp(x.Timestamp))
+            .ToList();
+
+        DateTime? shiftStart = null;
+        foreach (var checkpoint in history)
+        {
+            DateTime checkpointTime = ParseTimestamp(checkpoint.Timestamp);
+            if (checkpointTime > timestamp)
+                break;
+
+            if (checkpoint.Result.Contains("Start Shift", StringComparison.OrdinalIgnoreCase))
+                shiftStart = checkpointTime;
+            else if (checkpoint.Result.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+                shiftStart = null;
+        }
+
+        return shiftStart.HasValue ? shiftStart.Value.ToString("yyyy-MM-dd HH:mm:ss") : "No active shift";
+    }
+
+    private List<HistoryEntry> GetCurrentDealerShiftEntries()
+    {
+        var history = GetCurrentHistory()
+            .OrderBy(x => ParseTimestamp(x.Timestamp))
+            .ToList();
+
+        int startIndex = -1;
+        for (int i = 0; i < history.Count; i++)
+        {
+            if (history[i].Result.Contains("Start Shift", StringComparison.OrdinalIgnoreCase))
+                startIndex = i;
+            else if (history[i].Result.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+                startIndex = -1;
+        }
+
+        if (startIndex < 0)
+            return new List<HistoryEntry>();
+
+        return history.Skip(startIndex).ToList();
+    }
+
+    private void TryAutoDailyDealerBackup()
+    {
+        if (!Plugin.Configuration.DealerAutoDailyBackup)
+            return;
+
+        string today = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+        if (string.Equals(Plugin.Configuration.DealerLastDailyBackupDate, today, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        if (GetCurrentHistory().Count == 0)
+            return;
+
+        AddBackupHistoryEntry();
+        ExportCurrentHistory(false, true, "DailyBackup");
+        ExportCurrentHistory(true, true, "DailyBackup");
+        Plugin.Configuration.DealerLastDailyBackupDate = today;
+        Plugin.Configuration.Save();
+    }
+
+    private string GetDealerBackupDirectory()
+    {
+        string configured = Plugin.Configuration.DealerBackupDirectory?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))
+            return configured;
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
     }
 }

@@ -48,6 +48,50 @@ public class ConfigWindow : Window, IDisposable
             Plugin.Configuration.Save();
         }
 
+        var autoBackupEndShift = Plugin.Configuration.DealerAutoBackupOnEndShift;
+        if (ImGui.Checkbox("Auto Backup on End Shift", ref autoBackupEndShift))
+        {
+            Plugin.Configuration.DealerAutoBackupOnEndShift = autoBackupEndShift;
+            Plugin.Configuration.Save();
+        }
+
+        var autoDailyBackup = Plugin.Configuration.DealerAutoDailyBackup;
+        if (ImGui.Checkbox("Auto Daily Dealer Backup", ref autoDailyBackup))
+        {
+            Plugin.Configuration.DealerAutoDailyBackup = autoDailyBackup;
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Dealer Backup Directory:");
+        ImGui.SetNextItemWidth(420f);
+        string backupDirectory = Plugin.Configuration.DealerBackupDirectory ?? string.Empty;
+        if (ImGui.InputText("##DealerBackupDirectory", ref backupDirectory, 512))
+        {
+            Plugin.Configuration.DealerBackupDirectory = backupDirectory;
+            Plugin.Configuration.Save();
+        }
+
+        if (ImGui.Button("Use Desktop"))
+        {
+            Plugin.Configuration.DealerBackupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Use Documents"))
+        {
+            Plugin.Configuration.DealerBackupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear Backup Path"))
+        {
+            Plugin.Configuration.DealerBackupDirectory = string.Empty;
+            Plugin.Configuration.Save();
+        }
+
         ImGui.Spacing();
 
         if (ImGui.CollapsingHeader("Edit message", ImGuiTreeNodeFlags.DefaultOpen))
