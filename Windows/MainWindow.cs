@@ -32,6 +32,7 @@ public class MainWindow : Window, IDisposable
     private BigInteger tipsValue;
     private BigInteger betValue;
     private BigInteger bankingValue;
+    private BigInteger lastPlayerBankChangeValue;
 
     private string resultsLabel = string.Empty;
     private string startingLabel = string.Empty;
@@ -50,11 +51,13 @@ public class MainWindow : Window, IDisposable
     private DateTime currentBetDisplayOverrideUntilUtc = DateTime.MinValue;
     private string currentBetDisplayOverrideText = string.Empty;
     private Vector4 currentBetDisplayOverrideColor = new(1f, 1f, 1f, 1f);
+    private DateTime doubleDownPromptUntilUtc = DateTime.MinValue;
+    private DateTime doubleDownPendingUntilUtc = DateTime.MinValue;
 
     // Add new chat keywords here if your dealer uses different result words.
     private static readonly string[] WinTrackLabels = { "Win", "Won", "Winners", "Winner", "Wins" };
-    private static readonly string[] LossTrackLabels = { "Loss", "Lost", "Busted", "Losses", "Losts", "Busts", "Busteds"};
-    private static readonly string[] PushTrackLabels = { "Push", "Pushed" };
+    private static readonly string[] LossTrackLabels = { "Loss", "Lost", "Busted", "Losses", "Losts", "Busts", "Busteds" };
+    private static readonly string[] PushTrackLabels = { "Push", "Pushed", "Draw", "Tie" };
 
     private static readonly Regex TrackResultRegex = BuildTrackResultRegex();
     private static readonly string[] BlackjackMultiplierLabels = { "1.0x", "1.3x", "1.7x", "1.5x", "2.0x", "2.5x", "3.0x" };
@@ -68,6 +71,7 @@ public class MainWindow : Window, IDisposable
     private static readonly Vector4 NeutralColor = new(1.0f, 1.0f, 1.0f, 1.0f);
     private static readonly Vector4 GoldColor = new(0.95f, 0.80f, 0.25f, 1.0f);
     private static readonly Vector4 BlackjackColor = Hex("#00c0c7");
+    private static readonly Vector4 DoubleDownTextColor = Hex("#ff42ef");
     private static readonly Vector4 BlackText = new(0.0f, 0.0f, 0.0f, 1.0f);
 
     private static readonly Vector4 CopyButtonColor = Hex("#005210");
@@ -181,32 +185,13 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton("Delete Current", "DeleteCurrentButton", new Vector2(120f, 0f), DangerButtonColor) && Plugin.Configuration.Profiles.Count > 1)
             DeleteCurrentProfile();
 
-        const float topHelpButtonWidth = 58f;
-        const float topModeButtonWidth = 70f;
-        const float topQuestionButtonWidth = 22f;
-        const float dividerVisualWidth = 8f;
-
         ImGui.SameLine();
-        AlignTopRightControls(
-            topHelpButtonWidth +
-            dividerVisualWidth +
-            topModeButtonWidth +
-            topModeButtonWidth +
-            topQuestionButtonWidth +
-            (ImGui.GetStyle().ItemSpacing.X * 4f));
+        AlignTopRightControls(70f + 70f + 22f + (ImGui.GetStyle().ItemSpacing.X * 2f));
 
-        if (DrawStyledBoldButton("Help", "OpenHelpWindowButton", new Vector2(topHelpButtonWidth, 20f), Hex("#2aa163"), WhiteText))
-            Plugin.OpenHelpUi();
-
-        ImGui.SameLine();
-        ImGui.AlignTextToFramePadding();
-        ImGui.TextUnformatted("|");
-
-        ImGui.SameLine();
         if (DrawStyledBoldButton(
                 "Dealer",
                 "DealerModeButton",
-                new Vector2(topModeButtonWidth, 20f),
+                new Vector2(70f, 20f),
                 IsDealerMode ? DealerButtonColor : Darken(DealerButtonColor, 0.20f),
                 WhiteText,
                 pulsatingGlow: IsDealerMode))
@@ -218,7 +203,7 @@ public class MainWindow : Window, IDisposable
         if (DrawStyledBoldButton(
                 "Player",
                 "PlayerModeButton",
-                new Vector2(topModeButtonWidth, 20f),
+                new Vector2(70f, 20f),
                 IsPlayerMode ? PlayerButtonColor : Darken(PlayerButtonColor, 0.20f),
                 WhiteText,
                 pulsatingGlow: IsPlayerMode))
@@ -306,13 +291,11 @@ public class MainWindow : Window, IDisposable
         DrawSectionTitle("☆ Bank Tracking");
         ImGui.Dummy(new Vector2(0f, 2f));
 
-        if (ImGui.BeginTable("##PlayerTopBankFieldsTable", 5, ImGuiTableFlags.SizingFixedFit))
+        if (ImGui.BeginTable("##PlayerTopBankFieldsTable", 3, ImGuiTableFlags.SizingFixedFit))
         {
             ImGui.TableSetupColumn("PlayerLeftColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
             ImGui.TableSetupColumn("PlayerCenterColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
             ImGui.TableSetupColumn("PlayerActionColumn", ImGuiTableColumnFlags.WidthFixed, 96f);
-            ImGui.TableSetupColumn("PlayerTopSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, 14f);
-            ImGui.TableSetupColumn("PlayerAddBankColumn", ImGuiTableColumnFlags.WidthFixed, 218f);
 
             ImGui.TableNextRow();
 
@@ -324,12 +307,6 @@ public class MainWindow : Window, IDisposable
 
             ImGui.TableSetColumnIndex(2);
             DrawPlayerActionButtons();
-
-            ImGui.TableSetColumnIndex(3);
-            DrawTallVerticalSeparator((ImGui.GetFrameHeight() * 2f) + ImGui.GetStyle().ItemSpacing.Y);
-
-            ImGui.TableSetColumnIndex(4);
-            DrawPlayerAddBankControls();
 
             ImGui.EndTable();
         }
@@ -415,63 +392,338 @@ public class MainWindow : Window, IDisposable
 
 
 
-
-
-    private void DrawPlayerAddBankControls()
+    private void DrawPlayerTrackingLayout()
     {
-        const float bankingFieldWidth = 168f;
-        const float quickAddButtonWidth = 42f;
+        const float labelWidth = 96f;
+        const float betFieldWidth = 140f;
+        const float middleSpacerWidth = 16f;
+        const float clonedBlockWidth = 145f;
+        const float separatorColumnWidth = 14f;
+        const float dealerBlockWidth = 145f;
 
-        string? bankingDisplayText = null;
-        Vector4? bankingDisplayColor = null;
-        bool bankingIsZero = bankingValue == BigInteger.Zero && ParseBankValue(bankingInput) == BigInteger.Zero;
-        if (bankingIsZero)
+        float spacing = ImGui.GetStyle().ItemSpacing.X;
+        float originalButtonWidth = (betFieldWidth - spacing) * 0.5f;
+        float clonedButtonWidth = (clonedBlockWidth - spacing) * 0.5f;
+
+        GetTrackingStatusDisplay(out var statusText, out var statusColor);
+        GetCurrentBetDisplay(out var currentBetOverrideText, out var currentBetOverrideColor);
+
+        bool startingBankMissing = startingBankValue <= BigInteger.Zero;
+        BigInteger currentBetAmount = ParseBankValue(betInput);
+        bool notEnoughBank = !startingBankMissing && currentBetAmount > BigInteger.Zero && finalBankValue < currentBetAmount;
+
+        string? currentBetDisplayText;
+        Vector4? currentBetDisplayColor;
+
+        if (startingBankMissing)
         {
-            bankingDisplayText = "0";
-            bankingDisplayColor = LossColor;
+            currentBetDisplayText = "Need Start Bank";
+            currentBetDisplayColor = LossColor;
+        }
+        else if (notEnoughBank)
+        {
+            currentBetDisplayText = "Not enough bank";
+            currentBetDisplayColor = LossColor;
+        }
+        else
+        {
+            currentBetDisplayText = currentBetOverrideText;
+            currentBetDisplayColor = currentBetOverrideColor;
         }
 
-        if (!ImGui.BeginTable("##PlayerAddBankControlsTable", 2, ImGuiTableFlags.SizingFixedFit))
+        if (!ImGui.BeginTable("##PlayerTrackingUnifiedLayout", 6, ImGuiTableFlags.SizingFixedFit))
             return;
 
-        ImGui.TableSetupColumn("PlayerAddBankValueColumn", ImGuiTableColumnFlags.WidthFixed, bankingFieldWidth);
-        ImGui.TableSetupColumn("PlayerAddBankQuickColumn", ImGuiTableColumnFlags.WidthFixed, quickAddButtonWidth);
+        ImGui.TableSetupColumn("TrackingLabelColumn", ImGuiTableColumnFlags.WidthFixed, labelWidth);
+        ImGui.TableSetupColumn("TrackingOriginalColumn", ImGuiTableColumnFlags.WidthFixed, betFieldWidth);
+        ImGui.TableSetupColumn("TrackingSpacerColumn", ImGuiTableColumnFlags.WidthFixed, middleSpacerWidth);
+        ImGui.TableSetupColumn("TrackingCloneColumn", ImGuiTableColumnFlags.WidthFixed, clonedBlockWidth);
+        ImGui.TableSetupColumn("TrackingSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, separatorColumnWidth);
+        ImGui.TableSetupColumn("TrackingDealerColumn", ImGuiTableColumnFlags.WidthFixed, dealerBlockWidth);
 
+        // Row 1
         ImGui.TableNextRow();
 
-        ImGui.TableSetColumnIndex(0);
-        DrawCenteredNumericInputField(
-            "##BankingValue",
-            ref bankingInput,
-            ref bankingValue,
-            bankingFieldWidth,
-            ref bankingInputHasUserEdited,
-            true,
+        DrawCenteredEditableNumericCell(
+            0,
+            1,
+            "$ Current Bet:",
+            "##BetValue",
+            ref betInput,
+            ref betValue,
+            betFieldWidth,
+            ref betInputHasUserEdited,
+            !startingBankMissing && !notEnoughBank,
             null,
-            bankingDisplayText,
-            bankingDisplayColor,
-            0f,
-            true,
-            true);
+            currentBetDisplayText,
+            currentBetDisplayColor);
 
-        ImGui.TableSetColumnIndex(1);
-        if (DrawStyledBoldButton("+1M", "AddBanking1MTopButton", new Vector2(quickAddButtonWidth, 0f), Hex("#741a53"), WhiteText))
-            IncrementBankingValue(1_000_000);
-
-        ImGui.TableNextRow();
-        ImGui.TableSetColumnIndex(0);
-        if (DrawStyledBoldButton("Add Bank", "ApplyBankingButton", new Vector2(bankingFieldWidth, 0f), CopyButtonColor, WhiteText))
-            ApplyBankingAdjustment();
-
-        ImGui.TableSetColumnIndex(1);
+        ImGui.TableSetColumnIndex(2);
         ImGui.Dummy(Vector2.Zero);
+
+        ImGui.TableSetColumnIndex(3);
+        DrawCenteredNumericInputField(
+            "##ClonedBetValue",
+            ref betInput,
+            ref betValue,
+            clonedBlockWidth,
+            ref betInputHasUserEdited,
+            false,
+            null,
+            currentBetDisplayText,
+            currentBetDisplayColor,
+            0f,
+            false,
+            false);
+
+        ImGui.TableSetColumnIndex(4);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(5);
+        if (IsTrackDealerButtonDisabled)
+            ImGui.BeginDisabled();
+
+        bool hasTrackedDealer = !string.IsNullOrWhiteSpace(trackedDealerInput);
+        string trackButtonText = IsTrackDealerButtonDisabled
+            ? "Target not found"
+            : hasTrackedDealer ? "● Tracking Dealer:" : "○ Track Dealer";
+        Vector4 trackButtonTextColor = IsTrackDealerButtonDisabled ? BlackText : WhiteText;
+
+        if (DrawStyledBoldButton(trackButtonText, "TrackDealerButton", new Vector2(dealerBlockWidth, 0f), UtilityButtonColor, trackButtonTextColor) && !IsTrackDealerButtonDisabled)
+            TrackDealerFromCurrentTarget();
+
+        if (IsTrackDealerButtonDisabled)
+            ImGui.EndDisabled();
+
+        // Row 2
+        ImGui.TableNextRow();
+
+        ImGui.TableSetColumnIndex(0);
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Tracking:");
+        ImGui.SameLine(0f, 2f);
+        ImGui.AlignTextToFramePadding();
+        DrawBoldColoredText(statusText, statusColor);
+
+        ImGui.TableSetColumnIndex(1);
+        if (DrawStyledBoldButton("WIN ↑", "WinBetButton", new Vector2(originalButtonWidth, 0f), WinButtonColor, WhiteText))
+            ApplyBetResult(true);
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("↓ LOSS", "LossBetButton", new Vector2(originalButtonWidth, 0f), LossButtonColor, WhiteText))
+            ApplyBetResult(false);
+
+        ImGui.TableSetColumnIndex(2);
+        ImGui.Dummy(Vector2.Zero);
+
+        ImGui.TableSetColumnIndex(3);
+        DrawMultiplierDropdownButton("Natbj", ref natbjMultiplierIndex, new Vector2(clonedButtonWidth, 0f), WinButtonColor);
+
+        ImGui.SameLine();
+        DrawMultiplierDropdownButton("Dirtytbj", ref dirtytbjMultiplierIndex, new Vector2(clonedButtonWidth, 0f), LossButtonColor);
+
+        ImGui.TableSetColumnIndex(4);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(5);
+        ImGui.SetNextItemWidth(dealerBlockWidth);
+        bool confirmedByEnter = ImGui.InputText("##TrackedDealerInput", ref trackedDealerInput, 128, ImGuiInputTextFlags.EnterReturnsTrue);
+        bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+
+        if (confirmedByEnter || confirmedByFocusLoss)
+        {
+            trackedDealerInput = StripWorldSuffix(trackedDealerInput);
+            SaveCurrentProfileValues();
+        }
+
+        // Row 3
+        ImGui.TableNextRow();
+
+        ImGui.TableSetColumnIndex(0);
+        ImGui.Dummy(Vector2.Zero);
+
+        string autoTrackText = playerAutoTrackEnabled ? "● Auto Track" : "○ Auto Track";
+        ImGui.TableSetColumnIndex(1);
+        if (DrawGradientStyledBoldButton(
+                autoTrackText,
+                "AutoTrackButton",
+                new Vector2(betFieldWidth, 0f),
+                AutoTrackGradientStartColor,
+                AutoTrackGradientEndColor,
+                65f,
+                0.74f,
+                0.02f,
+                WhiteText))
+        {
+            playerAutoTrackEnabled = !playerAutoTrackEnabled;
+            SaveCurrentProfileValues();
+        }
+
+        ImGui.TableSetColumnIndex(2);
+        ImGui.Dummy(Vector2.Zero);
+
+        ImGui.TableSetColumnIndex(3);
+        if (DrawStyledBoldButton("NAT BJ", "NatBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#292f56"), WhiteText))
+            ApplyBlackjackResult(natbjMultiplierIndex);
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("DIRTY BJ", "DirtyBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#741a53"), WhiteText))
+            ApplyBlackjackResult(dirtytbjMultiplierIndex);
+
+        ImGui.TableSetColumnIndex(4);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(5);
+        if (DrawStyledBoldButton("Clear", "ClearTrackedDealerButton", new Vector2(dealerBlockWidth, 0f), LossButtonColor, WhiteText))
+        {
+            trackedDealerInput = string.Empty;
+            SaveCurrentProfileValues();
+        }
 
         ImGui.EndTable();
     }
 
-    private void DrawTallVerticalSeparator(float height)
+
+    private void DrawMultiplierDropdownButton(string internalName, ref int selectedIndex, Vector2 size, Vector4 buttonColor)
+    {
+        selectedIndex = Math.Clamp(selectedIndex, 0, BlackjackMultiplierLabels.Length - 1);
+        string visibleText = BlackjackMultiplierLabels[selectedIndex];
+
+        Vector2 actualSize = size;
+        if (actualSize.X <= 0f)
+            actualSize.X = 120f;
+        if (actualSize.Y <= 0f)
+            actualSize.Y = ImGui.GetFrameHeight();
+
+        bool pressed = ImGui.InvisibleButton($"##{internalName}", actualSize);
+        bool hovered = ImGui.IsItemHovered();
+        bool held = ImGui.IsItemActive();
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        var drawList = ImGui.GetWindowDrawList();
+        var style = ImGui.GetStyle();
+
+        uint frameColor = ImGui.GetColorU32(held ? ImGuiCol.FrameBgActive : hovered ? ImGuiCol.FrameBgHovered : ImGuiCol.FrameBg);
+        uint borderColor = ImGui.GetColorU32(ImGuiCol.Border);
+        uint textColor = ImGui.GetColorU32(ImGuiCol.Text);
+
+        drawList.AddRectFilled(min, max, frameColor, style.FrameRounding);
+        drawList.AddRect(min, max, borderColor, style.FrameRounding, ImDrawFlags.None, 1f);
+
+        float arrowRegionWidth = ImGui.GetFrameHeight();
+        float arrowSeparatorX = max.X - arrowRegionWidth;
+        drawList.AddLine(new Vector2(arrowSeparatorX, min.Y), new Vector2(arrowSeparatorX, max.Y), borderColor, 1f);
+
+        Vector2 textSize = ImGui.CalcTextSize(visibleText);
+        float textRegionWidth = arrowSeparatorX - min.X;
+        Vector2 textPos = new(
+            min.X + ((textRegionWidth - textSize.X) * 0.5f),
+            min.Y + ((max.Y - min.Y) - textSize.Y) * 0.5f);
+        drawList.AddText(textPos, textColor, visibleText);
+
+        Vector2 arrowCenter = new((arrowSeparatorX + max.X) * 0.5f, (min.Y + max.Y) * 0.5f + 1f);
+        drawList.AddTriangleFilled(
+            new Vector2(arrowCenter.X - 4f, arrowCenter.Y - 2f),
+            new Vector2(arrowCenter.X + 4f, arrowCenter.Y - 2f),
+            new Vector2(arrowCenter.X, arrowCenter.Y + 3f),
+            textColor);
+
+        if (pressed)
+            ImGui.OpenPopup($"##{internalName}Popup");
+
+        float popupHeight = (BlackjackMultiplierLabels.Length * (ImGui.GetFrameHeight() + style.ItemSpacing.Y)) + (style.WindowPadding.Y * 2f);
+        ImGui.SetNextWindowPos(new Vector2(min.X, min.Y - popupHeight - 2f), ImGuiCond.Appearing);
+
+        if (ImGui.BeginPopup($"##{internalName}Popup"))
+        {
+            for (int i = BlackjackMultiplierLabels.Length - 1; i >= 0; i--)
+            {
+                bool isSelected = selectedIndex == i;
+                if (ImGui.Selectable(BlackjackMultiplierLabels[i], isSelected))
+                {
+                    selectedIndex = i;
+                    ImGui.CloseCurrentPopup();
+                    SaveCurrentProfileValues();
+                }
+
+                if (isSelected)
+                    ImGui.SetItemDefaultFocus();
+            }
+
+            ImGui.EndPopup();
+        }
+    }
+
+    private void ApplyBlackjackResult(int multiplierIndex)
+    {
+        multiplierIndex = Math.Clamp(multiplierIndex, 0, BlackjackMultiplierTenths.Length - 1);
+
+        betValue = ParseBankValue(betInput);
+        betInput = FormatNumber(betValue);
+        betInputHasUserEdited = !string.IsNullOrWhiteSpace(betInput);
+
+        if (betValue <= BigInteger.Zero)
+        {
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+            finalBankValue = startingBankValue;
+
+        BigInteger payout = (betValue * BlackjackMultiplierTenths[multiplierIndex]) / 10;
+        BigInteger previousCurrentBank = finalBankValue;
+        finalBankValue += payout;
+        lastPlayerBankChangeValue = finalBankValue - previousCurrentBank;
+        finalBankInput = FormatNumber(finalBankValue);
+
+        RemoveMostRecentHistoryEntry();
+        AddBlackjackHistoryEntry(payout);
+
+        SaveCurrentProfileValues();
+    }
+
+    private void RemoveMostRecentHistoryEntry()
+    {
+        var history = GetCurrentHistory();
+        if (history.Count == 0)
+            return;
+
+        var mostRecentEntry = history[^1];
+        if (!string.IsNullOrWhiteSpace(mostRecentEntry.Result) &&
+            mostRecentEntry.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        history.RemoveAt(history.Count - 1);
+    }
+
+    private void AddBlackjackHistoryEntry(BigInteger payout)
+    {
+        var history = GetCurrentHistory();
+
+        history.Add(new HistoryEntry
+        {
+            House = houseInput.Trim(),
+            Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
+            StartingBank = FormatNumber(startingBankValue),
+            FinalBank = FormatNumber(finalBankValue),
+            Tips = string.Empty,
+            Result = $"+{FormatNumber(payout)} Blackjack"
+        });
+
+        if (history.Count > 200)
+            history.RemoveAt(0);
+
+        Plugin.Configuration.Save();
+    }
+
+    private void DrawMiniVerticalSeparator()
     {
         Vector2 start = ImGui.GetCursorScreenPos();
+        float height = ImGui.GetFrameHeight();
         float x = start.X + 6f;
         uint separatorColor = ImGui.GetColorU32(ImGuiCol.Separator);
         ImGui.GetWindowDrawList().AddLine(
@@ -482,355 +734,7 @@ public class MainWindow : Window, IDisposable
         ImGui.Dummy(new Vector2(12f, height));
     }
 
-private void DrawPlayerTrackingLayout()
-{
-    const float labelWidth = 96f;
-    const float betFieldWidth = 140f;
-    const float middleSpacerWidth = 16f;
-    const float clonedBlockWidth = 145f;
-    const float separatorColumnWidth = 14f;
-    const float dealerBlockWidth = 145f;
-
-    float spacing = ImGui.GetStyle().ItemSpacing.X;
-    float originalButtonWidth = (betFieldWidth - spacing) * 0.5f;
-    float clonedButtonWidth = (clonedBlockWidth - spacing) * 0.5f;
-
-    GetTrackingStatusDisplay(out var statusText, out var statusColor);
-    GetCurrentBetDisplay(out var currentBetOverrideText, out var currentBetOverrideColor);
-
-    bool startingBankMissing = startingBankValue <= BigInteger.Zero;
-    BigInteger currentBetAmount = ParseBankValue(betInput);
-    bool notEnoughBank = !startingBankMissing && currentBetAmount > BigInteger.Zero && finalBankValue < currentBetAmount;
-
-    string? currentBetDisplayText;
-    Vector4? currentBetDisplayColor;
-
-    if (startingBankMissing)
-    {
-        currentBetDisplayText = "Need Start Bank";
-        currentBetDisplayColor = LossColor;
-    }
-    else if (notEnoughBank)
-    {
-        currentBetDisplayText = "Not enough bank";
-        currentBetDisplayColor = LossColor;
-    }
-    else
-    {
-        currentBetDisplayText = currentBetOverrideText;
-        currentBetDisplayColor = currentBetOverrideColor;
-    }
-
-    if (!ImGui.BeginTable("##PlayerTrackingUnifiedLayout", 6, ImGuiTableFlags.SizingFixedFit))
-        return;
-
-    ImGui.TableSetupColumn("TrackingLabelColumn", ImGuiTableColumnFlags.WidthFixed, labelWidth);
-    ImGui.TableSetupColumn("TrackingOriginalColumn", ImGuiTableColumnFlags.WidthFixed, betFieldWidth);
-    ImGui.TableSetupColumn("TrackingSpacerColumn", ImGuiTableColumnFlags.WidthFixed, middleSpacerWidth);
-    ImGui.TableSetupColumn("TrackingCloneColumn", ImGuiTableColumnFlags.WidthFixed, clonedBlockWidth);
-    ImGui.TableSetupColumn("TrackingSeparatorColumn", ImGuiTableColumnFlags.WidthFixed, separatorColumnWidth);
-    ImGui.TableSetupColumn("TrackingDealerColumn", ImGuiTableColumnFlags.WidthFixed, dealerBlockWidth);
-
-    // Row 1
-    ImGui.TableNextRow();
-
-    DrawCenteredEditableNumericCell(
-        0,
-        1,
-        "$ Current Bet:",
-        "##BetValue",
-        ref betInput,
-        ref betValue,
-        betFieldWidth,
-        ref betInputHasUserEdited,
-        !startingBankMissing && !notEnoughBank,
-        null,
-        currentBetDisplayText,
-        currentBetDisplayColor);
-
-    ImGui.TableSetColumnIndex(2);
-    ImGui.Dummy(Vector2.Zero);
-
-    string? clonedBetDisplayText;
-    Vector4? clonedBetDisplayColor;
-
-    BigInteger clonedBetValue = ParseBankValue(betInput);
-    if (clonedBetValue > BigInteger.Zero)
-    {
-        clonedBetDisplayText = FormatNumber(clonedBetValue);
-        clonedBetDisplayColor = NeutralColor;
-    }
-    else
-    {
-        clonedBetDisplayText = "Set Current Bet";
-        clonedBetDisplayColor = LossColor;
-    }
-
-    ImGui.TableSetColumnIndex(3);
-    DrawCenteredNumericInputField(
-        "##ClonedBetValue",
-        ref betInput,
-        ref betValue,
-        clonedBlockWidth,
-        ref betInputHasUserEdited,
-        false,
-        null,
-        clonedBetDisplayText,
-        clonedBetDisplayColor,
-        0f,
-        false,
-        false);
-
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-
-    ImGui.TableSetColumnIndex(5);
-    ImGui.SetNextItemWidth(dealerBlockWidth);
-    bool confirmedByEnter = ImGui.InputText("##TrackedDealerInput", ref trackedDealerInput, 128, ImGuiInputTextFlags.EnterReturnsTrue);
-    bool confirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
-
-    if (confirmedByEnter || confirmedByFocusLoss)
-    {
-        trackedDealerInput = StripWorldSuffix(trackedDealerInput);
-        SaveCurrentProfileValues();
-    }
-
-    // Row 2
-    ImGui.TableNextRow();
-
-    ImGui.TableSetColumnIndex(0);
-    ImGui.AlignTextToFramePadding();
-    ImGui.TextUnformatted("Tracking:");
-    ImGui.SameLine(0f, 2f);
-    ImGui.AlignTextToFramePadding();
-    DrawBoldColoredText(statusText, statusColor);
-
-    ImGui.TableSetColumnIndex(1);
-    if (DrawStyledBoldButton("WIN ↑", "WinBetButton", new Vector2(originalButtonWidth, 0f), WinButtonColor, WhiteText))
-        ApplyBetResult(true);
-
-    ImGui.SameLine();
-    if (DrawStyledBoldButton("↓ LOSS", "LossBetButton", new Vector2(originalButtonWidth, 0f), LossButtonColor, WhiteText))
-        ApplyBetResult(false);
-
-    ImGui.TableSetColumnIndex(2);
-    ImGui.Dummy(Vector2.Zero);
-
-    ImGui.TableSetColumnIndex(3);
-    DrawMultiplierDropdownButton("Natbj", ref natbjMultiplierIndex, new Vector2(clonedButtonWidth, 0f), WinButtonColor);
-
-    ImGui.SameLine();
-    DrawMultiplierDropdownButton("Dirtytbj", ref dirtytbjMultiplierIndex, new Vector2(clonedButtonWidth, 0f), LossButtonColor);
-
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-
-    ImGui.TableSetColumnIndex(5);
-    if (IsTrackDealerButtonDisabled)
-        ImGui.BeginDisabled();
-
-    bool hasTrackedDealer = !string.IsNullOrWhiteSpace(trackedDealerInput);
-    string trackButtonText = IsTrackDealerButtonDisabled
-        ? "Target not found"
-        : hasTrackedDealer ? "● Tracking Dealer:" : "○ Track Dealer";
-    Vector4 trackButtonTextColor = IsTrackDealerButtonDisabled ? BlackText : WhiteText;
-
-    if (DrawStyledBoldButton(trackButtonText, "TrackDealerButton", new Vector2(dealerBlockWidth, 0f), UtilityButtonColor, trackButtonTextColor) && !IsTrackDealerButtonDisabled)
-        TrackDealerFromCurrentTarget();
-
-    if (IsTrackDealerButtonDisabled)
-        ImGui.EndDisabled();
-
-    // Row 3
-    ImGui.TableNextRow();
-
-    ImGui.TableSetColumnIndex(0);
-    ImGui.Dummy(Vector2.Zero);
-
-    string autoTrackText = playerAutoTrackEnabled ? "● Auto Track" : "○ Auto Track";
-    ImGui.TableSetColumnIndex(1);
-    if (DrawGradientStyledBoldButton(
-            autoTrackText,
-            "AutoTrackButton",
-            new Vector2(betFieldWidth, 0f),
-            AutoTrackGradientStartColor,
-            AutoTrackGradientEndColor,
-            65f,
-            0.74f,
-            0.02f,
-            WhiteText))
-    {
-        playerAutoTrackEnabled = !playerAutoTrackEnabled;
-        SaveCurrentProfileValues();
-    }
-
-    ImGui.TableSetColumnIndex(2);
-    ImGui.Dummy(Vector2.Zero);
-
-    ImGui.TableSetColumnIndex(3);
-    if (DrawStyledBoldButton("NAT BJ", "NatBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#292f56"), WhiteText))
-        ApplyBlackjackResult(natbjMultiplierIndex);
-
-    ImGui.SameLine();
-    if (DrawStyledBoldButton("DIRTY BJ", "DirtyBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#741a53"), WhiteText))
-        ApplyBlackjackResult(dirtytbjMultiplierIndex);
-
-    ImGui.TableSetColumnIndex(4);
-    DrawMiniVerticalSeparator();
-
-    ImGui.TableSetColumnIndex(5);
-    if (DrawStyledBoldButton("Clear", "ClearTrackedDealerButton", new Vector2(dealerBlockWidth, 0f), LossButtonColor, WhiteText))
-    {
-        trackedDealerInput = string.Empty;
-        SaveCurrentProfileValues();
-    }
-
-    ImGui.EndTable();
-}
-
-
-private void DrawMultiplierDropdownButton(string internalName, ref int selectedIndex, Vector2 size, Vector4 buttonColor)
-{
-    selectedIndex = Math.Clamp(selectedIndex, 0, BlackjackMultiplierLabels.Length - 1);
-    string visibleText = BlackjackMultiplierLabels[selectedIndex];
-
-    Vector2 actualSize = size;
-    if (actualSize.X <= 0f)
-        actualSize.X = 120f;
-    if (actualSize.Y <= 0f)
-        actualSize.Y = ImGui.GetFrameHeight();
-
-    bool pressed = ImGui.InvisibleButton($"##{internalName}", actualSize);
-    bool hovered = ImGui.IsItemHovered();
-    bool held = ImGui.IsItemActive();
-
-    Vector2 min = ImGui.GetItemRectMin();
-    Vector2 max = ImGui.GetItemRectMax();
-    var drawList = ImGui.GetWindowDrawList();
-    var style = ImGui.GetStyle();
-
-    uint frameColor = ImGui.GetColorU32(held ? ImGuiCol.FrameBgActive : hovered ? ImGuiCol.FrameBgHovered : ImGuiCol.FrameBg);
-    uint borderColor = ImGui.GetColorU32(ImGuiCol.Border);
-    uint textColor = ImGui.GetColorU32(ImGuiCol.Text);
-
-    drawList.AddRectFilled(min, max, frameColor, style.FrameRounding);
-    drawList.AddRect(min, max, borderColor, style.FrameRounding, ImDrawFlags.None, 1f);
-
-    float arrowRegionWidth = ImGui.GetFrameHeight();
-    float arrowSeparatorX = max.X - arrowRegionWidth;
-    drawList.AddLine(new Vector2(arrowSeparatorX, min.Y), new Vector2(arrowSeparatorX, max.Y), borderColor, 1f);
-
-    Vector2 textSize = ImGui.CalcTextSize(visibleText);
-    float textRegionWidth = arrowSeparatorX - min.X;
-    Vector2 textPos = new(
-        min.X + ((textRegionWidth - textSize.X) * 0.5f),
-        min.Y + ((max.Y - min.Y) - textSize.Y) * 0.5f);
-    drawList.AddText(textPos, textColor, visibleText);
-
-    Vector2 arrowCenter = new((arrowSeparatorX + max.X) * 0.5f, (min.Y + max.Y) * 0.5f + 1f);
-    drawList.AddTriangleFilled(
-        new Vector2(arrowCenter.X - 4f, arrowCenter.Y - 2f),
-        new Vector2(arrowCenter.X + 4f, arrowCenter.Y - 2f),
-        new Vector2(arrowCenter.X, arrowCenter.Y + 3f),
-        textColor);
-
-    if (pressed)
-        ImGui.OpenPopup($"##{internalName}Popup");
-
-    float popupHeight = (BlackjackMultiplierLabels.Length * (ImGui.GetFrameHeight() + style.ItemSpacing.Y)) + (style.WindowPadding.Y * 2f);
-    ImGui.SetNextWindowPos(new Vector2(min.X, min.Y - popupHeight - 2f), ImGuiCond.Appearing);
-
-    if (ImGui.BeginPopup($"##{internalName}Popup"))
-    {
-        for (int i = BlackjackMultiplierLabels.Length - 1; i >= 0; i--)
-        {
-            bool isSelected = selectedIndex == i;
-            if (ImGui.Selectable(BlackjackMultiplierLabels[i], isSelected))
-            {
-                selectedIndex = i;
-                ImGui.CloseCurrentPopup();
-                SaveCurrentProfileValues();
-            }
-
-            if (isSelected)
-                ImGui.SetItemDefaultFocus();
-        }
-
-        ImGui.EndPopup();
-    }
-}
-
-private void ApplyBlackjackResult(int multiplierIndex)
-{
-    multiplierIndex = Math.Clamp(multiplierIndex, 0, BlackjackMultiplierTenths.Length - 1);
-
-    betValue = ParseBankValue(betInput);
-    betInput = FormatNumber(betValue);
-    betInputHasUserEdited = !string.IsNullOrWhiteSpace(betInput);
-
-    if (betValue <= BigInteger.Zero)
-    {
-        SaveCurrentProfileValues();
-        return;
-    }
-
-    if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
-        finalBankValue = startingBankValue;
-
-    BigInteger payout = (betValue * BlackjackMultiplierTenths[multiplierIndex]) / 10;
-    finalBankValue += payout;
-    finalBankInput = FormatNumber(finalBankValue);
-
-    RemoveMostRecentHistoryEntry();
-    AddBlackjackHistoryEntry(payout);
-
-    SaveCurrentProfileValues();
-}
-
-private void RemoveMostRecentHistoryEntry()
-{
-    var history = GetCurrentHistory();
-    if (history.Count == 0)
-        return;
-
-    history.RemoveAt(history.Count - 1);
-}
-
-private void AddBlackjackHistoryEntry(BigInteger payout)
-{
-    var history = GetCurrentHistory();
-
-    history.Add(new HistoryEntry
-    {
-        House = houseInput.Trim(),
-        Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
-        StartingBank = FormatNumber(startingBankValue),
-        FinalBank = FormatNumber(finalBankValue),
-        Tips = string.Empty,
-        Result = $"+{FormatNumber(payout)} Blackjack"
-    });
-
-    if (history.Count > 200)
-        history.RemoveAt(0);
-
-    Plugin.Configuration.Save();
-}
-
-private void DrawMiniVerticalSeparator()
-{
-    Vector2 start = ImGui.GetCursorScreenPos();
-    float height = ImGui.GetFrameHeight();
-    float x = start.X + 6f;
-    uint separatorColor = ImGui.GetColorU32(ImGuiCol.Separator);
-    ImGui.GetWindowDrawList().AddLine(
-        new Vector2(x, start.Y),
-        new Vector2(x, start.Y + height),
-        separatorColor,
-        1f);
-    ImGui.Dummy(new Vector2(12f, height));
-}
-
-private void DrawMessageSection()
+    private void DrawMessageSection()
 
     {
         var includeTimestamp = Plugin.Configuration.IncludeTimestampInMessage;
@@ -877,9 +781,6 @@ private void DrawMessageSection()
             DrawSortOption("Most recent");
             DrawSortOption("Ascending");
             DrawSortOption("Results");
-
-            if (IsPlayerMode)
-                DrawSortOption("Blackjack");
 
             if (IsDealerMode)
                 DrawSortOption("Tips");
@@ -928,7 +829,7 @@ private void DrawMessageSection()
         if (IsDealerMode)
             ImGui.TableSetupColumn("Tips", ImGuiTableColumnFlags.WidthFixed, 120f);
 
-        ImGui.TableSetupColumn("Results", ImGuiTableColumnFlags.WidthFixed, 140f);
+        ImGui.TableSetupColumn("Results", ImGuiTableColumnFlags.WidthFixed, 200f);
         ImGui.TableHeadersRow();
 
         foreach (var entry in sortedHistory)
@@ -966,11 +867,14 @@ private void DrawMessageSection()
             }
 
             bool isBlackjackResult = entry.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase);
+            bool isDoubleDownResult = entry.Result.Contains("Double-Down", StringComparison.OrdinalIgnoreCase);
             var resultColor = isBlackjackResult
                 ? BlackjackColor
                 : ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
 
-            if (isBlackjackResult)
+            if (isDoubleDownResult)
+                DrawDoubleDownColoredCell(entry.Result);
+            else if (isBlackjackResult)
                 DrawBoldColoredCell(entry.Result, resultColor);
             else
                 DrawColoredCell(entry.Result, resultColor);
@@ -1334,6 +1238,33 @@ private void DrawMessageSection()
         ImGui.Dummy(new Vector2(size.X + 1f, size.Y));
     }
 
+
+    private void DrawDoubleDownColoredCell(string text)
+    {
+        const string suffix = "Double-Down";
+        int suffixIndex = text.IndexOf(suffix, StringComparison.OrdinalIgnoreCase);
+
+        if (suffixIndex < 0)
+        {
+            DrawColoredCell(text, ParseSignedFormatted(text) < BigInteger.Zero ? LossColor : ProfitColor);
+            return;
+        }
+
+        string prefix = text[..suffixIndex].TrimEnd();
+        string suffixText = text[suffixIndex..];
+        Vector4 prefixColor = prefix.StartsWith("-", StringComparison.Ordinal) ? LossColor : ProfitColor;
+
+        ImGui.PushStyleColor(ImGuiCol.Text, prefixColor);
+        ImGui.TextUnformatted(prefix);
+        ImGui.PopStyleColor();
+
+        ImGui.SameLine(0f, 4f);
+
+        ImGui.PushStyleColor(ImGuiCol.Text, DoubleDownTextColor);
+        ImGui.TextUnformatted(suffixText);
+        ImGui.PopStyleColor();
+    }
+
     private void DrawProfitsLossesSummary()
     {
         var history = GetCurrentHistory();
@@ -1680,10 +1611,6 @@ private void DrawMessageSection()
         {
             "Ascending" => history.OrderBy(x => ParseTimestamp(x.Timestamp)).ToList(),
             "Results" => history.OrderByDescending(x => ParseSignedFormatted(x.Result)).ToList(),
-            "Blackjack" when IsPlayerMode => history
-                .OrderByDescending(x => x.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase))
-                .ThenByDescending(x => ParseTimestamp(x.Timestamp))
-                .ToList(),
             "Tips" when IsDealerMode => history.OrderByDescending(x => ParseBankValue(x.Tips)).ToList(),
             _ => history.OrderByDescending(x => ParseTimestamp(x.Timestamp)).ToList(),
         };
@@ -1763,6 +1690,7 @@ private void DrawMessageSection()
             betInput = FormatNumber(betValue);
             bankingInput = string.Empty;
             bankingValue = BigInteger.Zero;
+            lastPlayerBankChangeValue = BigInteger.Zero;
             betInputHasUserEdited = ParseBankValue(profile.PlayerBetInput ?? string.Empty) > BigInteger.Zero;
             bankingInputHasUserEdited = false;
             return;
@@ -1837,6 +1765,7 @@ private void DrawMessageSection()
             betValue = BigInteger.Zero;
             tipsValue = BigInteger.Zero;
             bankingValue = BigInteger.Zero;
+            lastPlayerBankChangeValue = BigInteger.Zero;
             betInputHasUserEdited = false;
             bankingInputHasUserEdited = false;
         }
@@ -1905,6 +1834,9 @@ private void DrawMessageSection()
     private void AddHistoryEntry()
     {
         var history = GetCurrentHistory();
+        string resultText = IsPlayerMode
+            ? FormatSignedResult(lastPlayerBankChangeValue)
+            : GetCurrentResultText();
 
         history.Add(new HistoryEntry
         {
@@ -1913,7 +1845,7 @@ private void DrawMessageSection()
             StartingBank = FormatNumber(startingBankValue),
             FinalBank = FormatNumber(finalBankValue),
             Tips = IsPlayerMode ? string.Empty : FormatNumber(tipsValue),
-            Result = GetCurrentResultText()
+            Result = resultText
         });
 
         if (history.Count > 200)
@@ -1957,6 +1889,7 @@ private void DrawMessageSection()
 
         finalBankValue = startingBankValue;
         finalBankInput = FormatNumber(finalBankValue);
+        lastPlayerBankChangeValue = BigInteger.Zero;
     }
 
 
@@ -1975,10 +1908,13 @@ private void DrawMessageSection()
         if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
             finalBankValue = startingBankValue;
 
+        BigInteger previousCurrentBank = finalBankValue;
+
         finalBankValue = isWin
             ? finalBankValue + betValue
             : BigInteger.Max(BigInteger.Zero, finalBankValue - betValue);
 
+        lastPlayerBankChangeValue = finalBankValue - previousCurrentBank;
         finalBankInput = FormatNumber(finalBankValue);
         SaveCurrentProfileValues();
     }
@@ -2005,7 +1941,9 @@ private void DrawMessageSection()
         if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
             finalBankValue = startingBankValue;
 
+        BigInteger previousCurrentBank = finalBankValue;
         finalBankValue += bankingValue;
+        lastPlayerBankChangeValue = finalBankValue - previousCurrentBank;
         finalBankInput = FormatNumber(finalBankValue);
 
         AddBankingHistoryEntry(bankingValue);
@@ -2066,9 +2004,6 @@ private void DrawMessageSection()
             return;
 
         string senderName = NormalizeLooseText(StripWorldSuffix(sender.TextValue ?? string.Empty));
-        if (!NamesRoughlyMatch(senderName, trackedDealer))
-            return;
-
         string localPlayerName = NormalizeLooseText(Plugin.PlayerState.CharacterName ?? string.Empty);
         if (string.IsNullOrWhiteSpace(localPlayerName))
             return;
@@ -2077,9 +2012,41 @@ private void DrawMessageSection()
         if (string.IsNullOrWhiteSpace(messageText))
             return;
 
-        int winCount = 0;
-        int lossCount = 0;
-        int pushCount = 0;
+        bool senderIsTrackedDealer = NamesRoughlyMatch(senderName, trackedDealer);
+        bool senderIsLocalPlayer = NamesRoughlyMatch(senderName, localPlayerName);
+
+        if (senderIsTrackedDealer && MessageStartsWithTrackedPlayer(messageText, localPlayerName))
+            doubleDownPromptUntilUtc = DateTime.UtcNow.AddSeconds(20);
+
+        if (senderIsLocalPlayer && DateTime.UtcNow < doubleDownPromptUntilUtc && IsDoubleDownCallMessage(messageText))
+        {
+            doubleDownPromptUntilUtc = DateTime.MinValue;
+            doubleDownPendingUntilUtc = DateTime.UtcNow.AddSeconds(35);
+            return;
+        }
+
+        if (!senderIsTrackedDealer)
+            return;
+
+        if (!TryGetTrackedOutcomeCounts(messageText, localPlayerName, out int winCount, out int lossCount, out int pushCount))
+            return;
+
+        if (DateTime.UtcNow < doubleDownPendingUntilUtc)
+        {
+            ApplyTrackedDoubleDownOutcome(winCount, lossCount, pushCount);
+            doubleDownPendingUntilUtc = DateTime.MinValue;
+            doubleDownPromptUntilUtc = DateTime.MinValue;
+            return;
+        }
+
+        ApplyTrackedChatOutcome(winCount, lossCount, pushCount);
+    }
+
+    private bool TryGetTrackedOutcomeCounts(string messageText, string localPlayerName, out int winCount, out int lossCount, out int pushCount)
+    {
+        winCount = 0;
+        lossCount = 0;
+        pushCount = 0;
 
         foreach (Match match in TrackResultRegex.Matches(messageText))
         {
@@ -2106,10 +2073,119 @@ private void DrawMessageSection()
                 pushCount += matchCount;
         }
 
-        if (winCount == 0 && lossCount == 0 && pushCount == 0)
-            return;
+        return winCount > 0 || lossCount > 0 || pushCount > 0;
+    }
 
-        ApplyTrackedChatOutcome(winCount, lossCount, pushCount);
+    private void ApplyTrackedDoubleDownOutcome(int winCount, int lossCount, int pushCount)
+    {
+        betValue = ParseBankValue(betInput);
+        betInput = FormatNumber(betValue);
+
+        if (betValue <= BigInteger.Zero)
+        {
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+            finalBankValue = startingBankValue;
+
+        BigInteger oldCurrentBankValue = finalBankValue;
+        int netCount = winCount - lossCount;
+        bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
+        bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
+        bool isPushed = isPurePush || isBalancedPush;
+
+        BigInteger doubleDownUnit = betValue * 2;
+
+        if (netCount > 0)
+            finalBankValue += doubleDownUnit * netCount;
+        else if (netCount < 0)
+            finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - (doubleDownUnit * BigInteger.Abs(netCount)));
+
+        finalBankInput = FormatNumber(finalBankValue);
+
+        if (isPushed)
+        {
+            lastPlayerBankChangeValue = BigInteger.Zero;
+            AddTrackedHistoryEntry("+Pushed Double-Down");
+            SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
+            SaveCurrentProfileValues();
+            return;
+        }
+
+        BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+        lastPlayerBankChangeValue = trackedResultValue;
+        AddTrackedHistoryEntry($"{FormatSignedResult(trackedResultValue)} Double-Down");
+
+        if (trackedResultValue > BigInteger.Zero)
+            SetTemporaryCurrentBetDisplay("You won!", ProfitColor, 5);
+        else if (trackedResultValue < BigInteger.Zero)
+            SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
+
+        SaveCurrentProfileValues();
+    }
+
+    private static bool MessageStartsWithTrackedPlayer(string messageText, string normalizedPlayerName)
+    {
+        if (string.IsNullOrWhiteSpace(messageText) || string.IsNullOrWhiteSpace(normalizedPlayerName))
+            return false;
+
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (!normalizedMessage.StartsWith(normalizedPlayerName, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        if (normalizedMessage.Length == normalizedPlayerName.Length)
+            return true;
+
+        char nextChar = normalizedMessage[normalizedPlayerName.Length];
+        return char.IsWhiteSpace(nextChar);
+    }
+
+    private static bool IsDoubleDownCallMessage(string messageText)
+    {
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (string.IsNullOrWhiteSpace(normalizedMessage))
+            return false;
+
+        if (normalizedMessage.Contains("double down", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("i'll double down", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("ill double down", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("doubling down", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("going dd", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("DOUBLE DOWN!!!!!!!!!!", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("DOUBLE DOWN!", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("dd for sure", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("double down for sure", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("Lets dd", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("fck it dd", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (normalizedMessage.Contains("fuck it dd", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var parts = normalizedMessage.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        return parts.Any(x => string.Equals(x, "dd", StringComparison.OrdinalIgnoreCase));
     }
 
     private void ApplyTrackedChatOutcome(int winCount, int lossCount, int pushCount)
@@ -2141,6 +2217,7 @@ private void DrawMessageSection()
 
         if (isPushed)
         {
+            lastPlayerBankChangeValue = BigInteger.Zero;
             AddTrackedHistoryEntry("Pushed");
             SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
             SaveCurrentProfileValues();
@@ -2148,6 +2225,7 @@ private void DrawMessageSection()
         }
 
         BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+        lastPlayerBankChangeValue = trackedResultValue;
         AddTrackedHistoryEntry(FormatSignedResult(trackedResultValue));
 
         if (trackedResultValue > BigInteger.Zero)
