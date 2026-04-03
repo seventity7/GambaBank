@@ -54,10 +54,15 @@ public class MainWindow : Window, IDisposable
     private string currentBetDisplayOverrideText = string.Empty;
     private Vector4 currentBetDisplayOverrideColor = new(1f, 1f, 1f, 1f);
 
+    private int latencyPendingPlayerTotal;
+    private DateTime latencyPendingUntilUtc = DateTime.MinValue;
+
     private enum TrackerIndicatorState
     {
         Off,
         On,
+        Detected,
+        Done,
         Error
     }
 
@@ -84,11 +89,41 @@ public class MainWindow : Window, IDisposable
 
     private DateTime doubleDownPromptUntilUtc = DateTime.MinValue;
     private DateTime doubleDownPendingUntilUtc = DateTime.MinValue;
+    private DateTime blackjackPendingUntilUtc = DateTime.MinValue;
+    private DateTime doubleDownDoneUntilUtc = DateTime.MinValue;
+    private DateTime blackjackDoneUntilUtc = DateTime.MinValue;
+    private DateTime autoTrackRequireDealerUntilUtc = DateTime.MinValue;
 
     // Add new chat keywords here if your dealer uses different result words.
     private static readonly string[] WinTrackLabels = { "Win", "Won", "Winners", "Winner", "Wins" };
-    private static readonly string[] LossTrackLabels = { "Loss", "Lost", "Busted", "Losses", "Losts", "Busts", "Busteds" };
+    private static readonly string[] LossTrackLabels = { "Loss", "Lose", "Lost", "Busted", "Losses", "Loses", "Losts", "Busts", "Busteds" };
     private static readonly string[] PushTrackLabels = { "Push", "Pushed", "Draw", "Tie" };
+
+    // Add more dealer-message triggers for the FIRST blackjack detection stage here.
+    // The plugin arms blackjack pending when a tracked dealer message mentions the local player
+    // and contains any of these phrases, then it waits for the next dealer outcome message.
+    private static readonly string[] BlackjackStageOneKeywords =
+    {
+        "blackjack",
+        "natural blackjack",
+        "nat blackjack",
+        "natty blackjack",
+        "natural bj",
+        "nat bj",
+        "natty bj",
+        "got a natty",
+        "got natty",
+        "got a natural",
+        "got natural",
+        "natty",
+        "natural",
+        "natty!",
+        "nat!",
+        "natt!",
+        "blackjack <se.",
+        "bj",
+        "blackjack!"
+    };
 
     private static readonly Regex TrackResultRegex = BuildTrackResultRegex();
     private static readonly string[] BlackjackMultiplierLabels = { "1.0x", "1.3x", "1.7x", "1.5x", "2.0x", "2.5x", "3.0x" };
@@ -133,6 +168,7 @@ public class MainWindow : Window, IDisposable
     private bool IsDealerMode => !IsPlayerMode;
     private bool IsTrackDealerButtonDisabled => DateTime.UtcNow < trackDealerButtonDisabledUntilUtc;
     private bool IsAutoTrackingActive => IsPlayerMode && playerAutoTrackEnabled && !string.IsNullOrWhiteSpace(trackedDealerInput);
+    private bool IsPartyChatMonitoringActive => IsAutoTrackingActive;
 
     public MainWindow()
         : base("Gamba Bank", ImGuiWindowFlags.NoScrollbar | ImGuiWindowFlags.NoScrollWithMouse)
@@ -148,7 +184,10 @@ public class MainWindow : Window, IDisposable
         Size = DefaultWindowSize;
         SizeCondition = ImGuiCond.FirstUseEver;
 
+        _ = DebugHub.Snapshot();
+        AddDebugLog("INIT", "Background debug capture armed.");
         Plugin.ChatGui.ChatMessage += OnChatMessage;
+        AddDebugLog("INIT", "MainWindow initialized.");
     }
 
     public void Dispose()
@@ -498,7 +537,7 @@ public class MainWindow : Window, IDisposable
         const float clonedBlockWidth = 145f;
         const float separatorColumnWidth = 14f;
         const float dealerBlockWidth = 145f;
-        const float trackerStatusColumnWidth = 300f;
+        const float trackerStatusColumnWidth = 470f;
 
         float spacing = ImGui.GetStyle().ItemSpacing.X;
         float originalButtonWidth = (betFieldWidth - spacing) * 0.5f;
@@ -543,6 +582,7 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("TrackingStatusColumn", ImGuiTableColumnFlags.WidthFixed, trackerStatusColumnWidth);
 
         RefreshTrackerIndicatorStates();
+        UpdateTrackerTransientStates();
 
         // Row 1
         ImGui.TableNextRow();
@@ -590,10 +630,13 @@ public class MainWindow : Window, IDisposable
         string trackButtonText = IsTrackDealerButtonDisabled
             ? "Target not found"
             : hasTrackedDealer ? "● Tracking Dealer:" : "○ Track Dealer";
-        Vector4 trackButtonTextColor = IsTrackDealerButtonDisabled ? BlackText : WhiteText;
+        Vector4 trackButtonTextColor = WhiteText;
 
         if (DrawStyledBoldButton(trackButtonText, "TrackDealerButton", new Vector2(dealerBlockWidth, 0f), UtilityButtonColor, trackButtonTextColor) && !IsTrackDealerButtonDisabled)
+        {
+            AddDebugLog("TRACK", "Track Dealer button pressed.");
             TrackDealerFromCurrentTarget();
+        }
 
         if (IsTrackDealerButtonDisabled)
             ImGui.EndDisabled();
@@ -616,11 +659,17 @@ public class MainWindow : Window, IDisposable
 
         ImGui.TableSetColumnIndex(1);
         if (DrawStyledBoldButton("WIN ↑", "WinBetButton", new Vector2(originalButtonWidth, 0f), WinButtonColor, WhiteText))
+        {
+            AddDebugLog("BET", "Manual WIN button pressed.");
             ApplyBetResult(true);
+        }
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("↓ LOSS", "LossBetButton", new Vector2(originalButtonWidth, 0f), LossButtonColor, WhiteText))
+        {
+            AddDebugLog("BET", "Manual LOSS button pressed.");
             ApplyBetResult(false);
+        }
 
         ImGui.TableSetColumnIndex(2);
         ImGui.Dummy(Vector2.Zero);
@@ -649,13 +698,16 @@ public class MainWindow : Window, IDisposable
         DrawMiniVerticalSeparator();
 
         ImGui.TableSetColumnIndex(7);
-        DrawTrackerStatusLine(
+        DrawTrackerStatusLineThree(
             "Wins:",
             ProfitColor,
             trackerWinsState,
             "Losses:",
             LossColor,
             trackerLossesState,
+            "Dealer:",
+            Hex("#075B39"),
+            GetDealerTrackingState(),
             trackerStatusColumnWidth);
 
         // Row 3
@@ -664,7 +716,9 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetColumnIndex(0);
         ImGui.Dummy(Vector2.Zero);
 
-        string autoTrackText = playerAutoTrackEnabled ? "● Auto Track" : "○ Auto Track";
+        string autoTrackText = DateTime.UtcNow < autoTrackRequireDealerUntilUtc
+            ? "Track Dealer First"
+            : playerAutoTrackEnabled ? "● Auto Track" : "○ Auto Track";
         ImGui.TableSetColumnIndex(1);
         if (DrawGradientStyledBoldButton(
                 autoTrackText,
@@ -677,9 +731,18 @@ public class MainWindow : Window, IDisposable
                 0.02f,
                 WhiteText))
         {
-            playerAutoTrackEnabled = !playerAutoTrackEnabled;
-            ResetTrackerIndicatorStates();
-            SaveCurrentProfileValues();
+            if (string.IsNullOrWhiteSpace(trackedDealerInput))
+            {
+                autoTrackRequireDealerUntilUtc = DateTime.UtcNow.AddSeconds(5);
+                AddDebugLog("WARN", "Auto Track blocked because no dealer is currently tracked.");
+            }
+            else
+            {
+                playerAutoTrackEnabled = !playerAutoTrackEnabled;
+                AddDebugLog("AUTO", $"Auto Track toggled => {(playerAutoTrackEnabled ? "ON" : "OFF")}. Party-only monitoring {(playerAutoTrackEnabled && !string.IsNullOrWhiteSpace(trackedDealerInput) ? "armed" : "inactive") }.");
+                ResetTrackerIndicatorStates();
+                SaveCurrentProfileValues();
+            }
         }
 
         ImGui.TableSetColumnIndex(2);
@@ -687,11 +750,17 @@ public class MainWindow : Window, IDisposable
 
         ImGui.TableSetColumnIndex(3);
         if (DrawStyledBoldButton("NAT BJ", "NatBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#292f56"), WhiteText))
+        {
+            AddDebugLog("BET", $"Manual NAT BJ button pressed with multiplier {BlackjackMultiplierLabels[Math.Clamp(natbjMultiplierIndex, 0, BlackjackMultiplierLabels.Length - 1)]}.");
             ApplyBlackjackResult(natbjMultiplierIndex);
+        }
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("DIRTY BJ", "DirtyBjActionButton", new Vector2(clonedButtonWidth, 0f), Hex("#741a53"), WhiteText))
+        {
+            AddDebugLog("BET", $"Manual DIRTY BJ button pressed with multiplier {BlackjackMultiplierLabels[Math.Clamp(dirtytbjMultiplierIndex, 0, BlackjackMultiplierLabels.Length - 1)]}.");
             ApplyBlackjackResult(dirtytbjMultiplierIndex);
+        }
 
         ImGui.TableSetColumnIndex(4);
         DrawMiniVerticalSeparator();
@@ -699,6 +768,7 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetColumnIndex(5);
         if (DrawStyledBoldButton("Clear", "ClearTrackedDealerButton", new Vector2(dealerBlockWidth, 0f), LossButtonColor, WhiteText))
         {
+            AddDebugLog("TRACK", $"Clearing tracked dealer '{trackedDealerInput}'. Party-only monitoring disabled until Track Dealer is set again.");
             trackedDealerInput = string.Empty;
             ResetTrackerIndicatorStates();
             SaveCurrentProfileValues();
@@ -708,7 +778,7 @@ public class MainWindow : Window, IDisposable
         DrawMiniVerticalSeparator();
 
         ImGui.TableSetColumnIndex(7);
-        DrawTrackerStatusLine(
+        DrawTrackerStatusLineTwoAligned(
             "Blackjacks:",
             Hex("#00c0c7"),
             trackerBlackjacksState,
@@ -820,6 +890,8 @@ public class MainWindow : Window, IDisposable
             RemoveMostRecentHistoryEntry();
             AddBlackjackHistoryEntry(payout);
 
+            trackerBlackjacksState = TrackerIndicatorState.Done;
+            blackjackDoneUntilUtc = DateTime.UtcNow.AddSeconds(5);
             SaveCurrentProfileValues();
         }
         catch
@@ -849,6 +921,7 @@ public class MainWindow : Window, IDisposable
     {
         var history = GetCurrentHistory();
 
+        AddDebugLog("HISTORY", $"Adding blackjack history entry: +{FormatNumber(payout)} Blackjack.");
         history.Add(new HistoryEntry
         {
             House = houseInput.Trim(),
@@ -883,7 +956,7 @@ public class MainWindow : Window, IDisposable
     {
         Vector2 start = ImGui.GetCursorScreenPos();
         Vector2 textSize = ImGui.CalcTextSize(text);
-        float titleOffsetX = -100f;
+        float titleOffsetX = -185f;
         float x = start.X + MathF.Max(0f, (availableWidth - textSize.X) * 0.5f) + titleOffsetX;
         float y = start.Y + MathF.Max(0f, (ImGui.GetFrameHeight() - textSize.Y) * 0.5f);
 
@@ -907,42 +980,150 @@ public class MainWindow : Window, IDisposable
         const float highlightPadX = 3f;
         const float highlightPadY = 1f;
         const float segmentGap = 4f;
-        const float rightSideGap = 10f;
-        const float leftSectionWidth = 128f;
+        const float sectionGap = 14f;
 
         string leftValue = GetTrackerIndicatorText(leftState);
         string rightValue = GetTrackerIndicatorText(rightState);
         Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
         Vector4 rightValueColor = GetTrackerIndicatorColor(rightState);
 
-        Vector2 leftLabelSize = ImGui.CalcTextSize(leftLabel);
-        Vector2 leftValueSize = ImGui.CalcTextSize(leftValue);
-        Vector2 dividerSize = ImGui.CalcTextSize("|");
-        Vector2 rightLabelSize = ImGui.CalcTextSize(rightLabel);
-        Vector2 rightValueSize = ImGui.CalcTextSize(rightValue);
-
-        float leftLabelWidth = leftLabelSize.X + (highlightPadX * 2f);
-        float rightLabelWidth = rightLabelSize.X + (highlightPadX * 2f);
-
+        float sectionWidth = MathF.Max(165f, (availableWidth - sectionGap) * 0.5f);
         Vector2 start = ImGui.GetCursorScreenPos();
-        float startX = start.X + 2f;
-        float dividerX = startX + leftSectionWidth;
         float centerY = start.Y + (ImGui.GetFrameHeight() * 0.5f);
         float textBaseY = centerY - (ImGui.GetTextLineHeight() * 0.5f);
 
-        float x = startX;
-        DrawHighlightedInlineTextSegment(leftLabel, leftLabelColor, new Vector2(x, textBaseY), highlightPadX, highlightPadY);
-        x += leftLabelWidth + segmentGap;
-
-        DrawBoldInlineTextSegment(leftValue, leftValueColor, new Vector2(x, textBaseY));
-
-        x = dividerX + rightSideGap;
-        DrawHighlightedInlineTextSegment(rightLabel, rightLabelColor, new Vector2(x, textBaseY), highlightPadX, highlightPadY);
-        x += rightLabelWidth + segmentGap;
-
-        DrawBoldInlineTextSegment(rightValue, rightValueColor, new Vector2(x, textBaseY));
+        DrawTrackerStatusSection(start.X, textBaseY, sectionWidth, leftLabel, leftLabelColor, leftValue, leftValueColor, highlightPadX, highlightPadY, segmentGap);
+        DrawTrackerStatusSection(start.X + sectionWidth + sectionGap, textBaseY, sectionWidth, rightLabel, rightLabelColor, rightValue, rightValueColor, highlightPadX, highlightPadY, segmentGap);
 
         ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
+    }
+
+    private void DrawTrackerStatusLineThree(
+        string leftLabel,
+        Vector4 leftLabelColor,
+        TrackerIndicatorState leftState,
+        string middleLabel,
+        Vector4 middleLabelColor,
+        TrackerIndicatorState middleState,
+        string rightLabel,
+        Vector4 rightLabelColor,
+        TrackerIndicatorState rightState,
+        float availableWidth)
+    {
+        const float highlightPadX = 3f;
+        const float highlightPadY = 1f;
+        const float segmentGap = 4f;
+        const float sectionGap = 12f;
+
+        string leftValue = GetTrackerIndicatorText(leftState);
+        string middleValue = GetTrackerIndicatorText(middleState);
+        string rightValue = GetTrackerIndicatorText(rightState);
+
+        Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
+        Vector4 middleValueColor = GetTrackerIndicatorColor(middleState);
+        Vector4 rightValueColor = GetTrackerIndicatorColor(rightState);
+
+        float sectionWidth = MathF.Max(135f, (availableWidth - (sectionGap * 2f)) / 3f);
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float centerY = start.Y + (ImGui.GetFrameHeight() * 0.5f);
+        float textBaseY = centerY - (ImGui.GetTextLineHeight() * 0.5f);
+
+        DrawTrackerStatusSection(start.X, textBaseY, sectionWidth, leftLabel, leftLabelColor, leftValue, leftValueColor, highlightPadX, highlightPadY, segmentGap);
+        DrawTrackerStatusSection(start.X + sectionWidth + sectionGap, textBaseY, sectionWidth, middleLabel, middleLabelColor, middleValue, middleValueColor, highlightPadX, highlightPadY, segmentGap);
+        DrawTrackerStatusSection(start.X + (sectionWidth + sectionGap) * 2f, textBaseY, sectionWidth, rightLabel, rightLabelColor, rightValue, rightValueColor, highlightPadX, highlightPadY, segmentGap);
+
+        ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
+    }
+
+    private void DrawTrackerStatusLineTwoAligned(
+        string leftLabel,
+        Vector4 leftLabelColor,
+        TrackerIndicatorState leftState,
+        string middleLabel,
+        Vector4 middleLabelColor,
+        TrackerIndicatorState middleState,
+        float availableWidth)
+    {
+        const float highlightPadX = 3f;
+        const float highlightPadY = 1f;
+        const float segmentGap = 4f;
+        const float sectionGap = 12f;
+
+        string leftValue = GetTrackerIndicatorText(leftState);
+        string middleValue = GetTrackerIndicatorText(middleState);
+
+        Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
+        Vector4 middleValueColor = GetTrackerIndicatorColor(middleState);
+
+        float sectionWidth = MathF.Max(135f, (availableWidth - (sectionGap * 2f)) / 3f);
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float centerY = start.Y + (ImGui.GetFrameHeight() * 0.5f);
+        float textBaseY = centerY - (ImGui.GetTextLineHeight() * 0.5f);
+
+        DrawTrackerStatusSection(start.X, textBaseY, sectionWidth, leftLabel, leftLabelColor, leftValue, leftValueColor, highlightPadX, highlightPadY, segmentGap);
+        DrawTrackerStatusSection(start.X + sectionWidth + sectionGap, textBaseY, sectionWidth, middleLabel, middleLabelColor, middleValue, middleValueColor, highlightPadX, highlightPadY, segmentGap);
+
+        ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
+    }
+
+    private void DrawTrackerStatusSection(
+        float sectionX,
+        float textBaseY,
+        float sectionWidth,
+        string label,
+        Vector4 labelColor,
+        string value,
+        Vector4 valueColor,
+        float highlightPadX,
+        float highlightPadY,
+        float segmentGap)
+    {
+        float x = sectionX;
+        DrawHighlightedInlineTextSegment(label, labelColor, new Vector2(x, textBaseY), highlightPadX, highlightPadY);
+
+        float labelWidth = ImGui.CalcTextSize(label).X + (highlightPadX * 2f);
+        x += labelWidth + segmentGap;
+
+        DrawTrackerIndicatorValue(value, valueColor, new Vector2(x, textBaseY));
+    }
+
+
+    private void DrawTrackerIndicatorValue(string text, Vector4 accentColor, Vector2 textPos)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        uint neutralCol = ImGui.ColorConvertFloat4ToU32(WhiteText);
+        uint accentCol = ImGui.ColorConvertFloat4ToU32(accentColor);
+
+        const string openBracket = "[";
+        const string closeBracket = "]";
+
+        if (text.StartsWith("[✓]", StringComparison.Ordinal) || text.StartsWith("[X]", StringComparison.Ordinal))
+        {
+            string symbol = text.StartsWith("[✓]", StringComparison.Ordinal) ? "✓" : "X";
+            string suffix = text.Length > 3 ? text.Substring(3) : string.Empty;
+
+            Vector2 pos = textPos;
+            drawList.AddText(pos, neutralCol, openBracket);
+            pos.X += ImGui.CalcTextSize(openBracket).X;
+
+            drawList.AddText(pos, accentCol, symbol);
+            drawList.AddText(pos + new Vector2(1f, 0f), accentCol, symbol);
+            pos.X += ImGui.CalcTextSize(symbol).X;
+
+            drawList.AddText(pos, neutralCol, closeBracket);
+            pos.X += ImGui.CalcTextSize(closeBracket).X;
+
+            if (!string.IsNullOrEmpty(suffix))
+            {
+                drawList.AddText(pos, accentCol, suffix);
+                drawList.AddText(pos + new Vector2(1f, 0f), accentCol, suffix);
+            }
+
+            return;
+        }
+
+        drawList.AddText(textPos, accentCol, text);
+        drawList.AddText(textPos + new Vector2(1f, 0f), accentCol, text);
     }
 
     private void DrawHighlightedInlineTextSegment(string text, Vector4 textColor, Vector2 textPos, float padX, float padY)
@@ -981,10 +1162,26 @@ public class MainWindow : Window, IDisposable
             trackerWinsState = activeState;
         if (trackerLossesState != TrackerIndicatorState.Error)
             trackerLossesState = activeState;
-        if (trackerBlackjacksState != TrackerIndicatorState.Error)
+        if (trackerBlackjacksState != TrackerIndicatorState.Error && trackerBlackjacksState != TrackerIndicatorState.Detected && trackerBlackjacksState != TrackerIndicatorState.Done)
             trackerBlackjacksState = activeState;
-        if (trackerDoubleDownsState != TrackerIndicatorState.Error)
+        if (trackerDoubleDownsState != TrackerIndicatorState.Error && trackerDoubleDownsState != TrackerIndicatorState.Detected && trackerDoubleDownsState != TrackerIndicatorState.Done)
             trackerDoubleDownsState = activeState;
+    }
+
+    private void UpdateTrackerTransientStates()
+    {
+        TrackerIndicatorState activeState = IsAutoTrackingActive ? TrackerIndicatorState.On : TrackerIndicatorState.Off;
+        DateTime now = DateTime.UtcNow;
+
+        if (trackerDoubleDownsState == TrackerIndicatorState.Detected && now >= doubleDownPromptUntilUtc && now >= doubleDownPendingUntilUtc)
+            trackerDoubleDownsState = activeState;
+        else if (trackerDoubleDownsState == TrackerIndicatorState.Done && now >= doubleDownDoneUntilUtc)
+            trackerDoubleDownsState = activeState;
+
+        if (trackerBlackjacksState == TrackerIndicatorState.Detected && now >= blackjackPendingUntilUtc)
+            trackerBlackjacksState = activeState;
+        else if (trackerBlackjacksState == TrackerIndicatorState.Done && now >= blackjackDoneUntilUtc)
+            trackerBlackjacksState = activeState;
     }
 
     private void ResetTrackerIndicatorStates()
@@ -993,6 +1190,10 @@ public class MainWindow : Window, IDisposable
         trackerLossesState = TrackerIndicatorState.Off;
         trackerBlackjacksState = TrackerIndicatorState.Off;
         trackerDoubleDownsState = TrackerIndicatorState.Off;
+        blackjackPendingUntilUtc = DateTime.MinValue;
+        blackjackDoneUntilUtc = DateTime.MinValue;
+        doubleDownDoneUntilUtc = DateTime.MinValue;
+        ClearPendingLatencyTrack();
         RefreshTrackerIndicatorStates();
     }
 
@@ -1000,9 +1201,11 @@ public class MainWindow : Window, IDisposable
     {
         return state switch
         {
-            TrackerIndicatorState.On => "ON",
+            TrackerIndicatorState.On => "[✓]",
+            TrackerIndicatorState.Detected => "[✓] Detected",
+            TrackerIndicatorState.Done => "[✓] Done",
             TrackerIndicatorState.Error => "Erro",
-            _ => "OFF"
+            _ => "[X]"
         };
     }
 
@@ -1011,9 +1214,53 @@ public class MainWindow : Window, IDisposable
         return state switch
         {
             TrackerIndicatorState.On => ProfitColor,
+            TrackerIndicatorState.Detected => ProfitColor,
+            TrackerIndicatorState.Done => ProfitColor,
             TrackerIndicatorState.Error => LossColor,
             _ => LossColor
         };
+    }
+
+    private TrackerIndicatorState GetDealerTrackingState()
+    {
+        return string.IsNullOrWhiteSpace(trackedDealerInput)
+            ? TrackerIndicatorState.Off
+            : TrackerIndicatorState.On;
+    }
+
+    private void AddDebugLog(string category, string message)
+    {
+        DebugHub.Add(category, message);
+    }
+
+    public string BuildDebugSnapshot()
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine($"Mode: {(IsPlayerMode ? "Player" : "Dealer")}");
+        sb.AppendLine($"Profile: {Plugin.Configuration.ActiveProfileName}");
+        sb.AppendLine($"Starting Bank: {FormatNumber(startingBankValue)}");
+        sb.AppendLine($"Current/Final Bank: {FormatNumber(finalBankValue)}");
+        sb.AppendLine($"Tips: {FormatNumber(tipsValue)}");
+        sb.AppendLine($"Bet: {FormatNumber(betValue)}");
+        sb.AppendLine($"Banking: {FormatNumber(bankingValue)}");
+        sb.AppendLine($"Last Bank Delta: {FormatSignedResult(lastPlayerBankChangeValue)}");
+        sb.AppendLine($"Auto Track Enabled: {playerAutoTrackEnabled}");
+        sb.AppendLine($"Auto Track Active: {IsAutoTrackingActive}");
+        sb.AppendLine($"Party Chat Monitoring Active: {IsPartyChatMonitoringActive}");
+        sb.AppendLine($"Tracked Dealer: {trackedDealerInput}");
+        sb.AppendLine($"Local Player: {Plugin.PlayerState.CharacterName ?? string.Empty}");
+        sb.AppendLine($"Latency Pending Total: {latencyPendingPlayerTotal}");
+        sb.AppendLine($"Latency Pending Until (UTC): {(latencyPendingUntilUtc == DateTime.MinValue ? "--" : latencyPendingUntilUtc.ToString("O"))}");
+        sb.AppendLine($"Double-Down Prompt Until (UTC): {(doubleDownPromptUntilUtc == DateTime.MinValue ? "--" : doubleDownPromptUntilUtc.ToString("O"))}");
+        sb.AppendLine($"Double-Down Pending Until (UTC): {(doubleDownPendingUntilUtc == DateTime.MinValue ? "--" : doubleDownPendingUntilUtc.ToString("O"))}");
+        sb.AppendLine($"Blackjack Pending Until (UTC): {(blackjackPendingUntilUtc == DateTime.MinValue ? "--" : blackjackPendingUntilUtc.ToString("O"))}");
+        sb.AppendLine($"Tracker States: W={GetTrackerIndicatorText(trackerWinsState)} L={GetTrackerIndicatorText(trackerLossesState)} BJ={GetTrackerIndicatorText(trackerBlackjacksState)} DD={GetTrackerIndicatorText(trackerDoubleDownsState)}");
+        sb.AppendLine($"Dealer Filters: House={dealerHouseFilter} Result={dealerResultFilter} Date={dealerDateFilter}");
+        sb.AppendLine($"Search: {searchInput}");
+        sb.AppendLine($"Sort: {sortBy}");
+        sb.AppendLine($"Tracked Dealer Button Disabled: {IsTrackDealerButtonDisabled}");
+        sb.AppendLine($"History Count: {GetCurrentHistory().Count}");
+        return sb.ToString();
     }
 
     private void DrawMessageSection()
@@ -1157,6 +1404,7 @@ public class MainWindow : Window, IDisposable
     {
         try
         {
+            AddDebugLog("UI", $"Export requested | Format={(asCsv ? "CSV" : "TXT")} | AutoBackup={isAutoBackup} | Prefix='{filePrefix}'.");
             var entries = GetSortedHistory();
             string outputDirectory = isAutoBackup ? GetDealerBackupDirectory() : GetHistoryExportDirectory();
             if (!Directory.Exists(outputDirectory))
@@ -1178,9 +1426,11 @@ public class MainWindow : Window, IDisposable
             dealerExportFilePath = filePath;
             dealerExportFailed = false;
             dealerExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+            AddDebugLog("UI", $"Export completed | Format={(asCsv ? "CSV" : "TXT")} | Path='{filePath}'.");
         }
-        catch
+        catch (Exception ex)
         {
+            AddDebugLog("ERR", $"Export failed | Format={(asCsv ? "CSV" : "TXT")} | Prefix='{filePrefix}' | {ex.GetType().Name}: {ex.Message}");
             dealerExportStatusText = isAutoBackup ? "Backup export failed" : "Export failed";
             dealerExportDirectoryPath = string.Empty;
             dealerExportFileName = string.Empty;
@@ -1209,11 +1459,17 @@ public class MainWindow : Window, IDisposable
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("Export TXT", IsPlayerMode ? "PlayerExportTxtButton" : "DealerExportTxtButton", new Vector2(84f, ImGui.GetTextLineHeight() + 2f), Hex("#DA9E00"), WhiteText))
+        {
+            AddDebugLog("UI", $"Export TXT button clicked in {(IsPlayerMode ? "Player" : "Dealer")} mode.");
             ExportCurrentHistory(false);
+        }
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("Export CSV", IsPlayerMode ? "PlayerExportCsvButton" : "DealerExportCsvButton", new Vector2(84f, ImGui.GetTextLineHeight() + 2f), DealerExportCsvColor, WhiteText))
+        {
+            AddDebugLog("UI", $"Export CSV button clicked in {(IsPlayerMode ? "Player" : "Dealer")} mode.");
             ExportCurrentHistory(true);
+        }
 
         ImGui.Spacing();
 
@@ -1255,11 +1511,15 @@ public class MainWindow : Window, IDisposable
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("Undo", "UndoButton", new Vector2(70f, 0f), UtilityButtonColor))
+        {
+            AddDebugLog("UI", $"Undo button clicked in {(IsPlayerMode ? "Player" : "Dealer")} mode.");
             UndoMostRecentHistory();
+        }
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("Clear History", "ClearHistoryButton", new Vector2(115f, 0f), UtilityButtonColor))
         {
+            AddDebugLog("UI", $"Clear History button clicked in {(IsPlayerMode ? "Player" : "Dealer")} mode. Removing {GetCurrentHistory().Count} entries.");
             GetCurrentHistory().Clear();
             Plugin.Configuration.Save();
         }
@@ -2309,7 +2569,10 @@ public class MainWindow : Window, IDisposable
     {
         var history = GetCurrentHistory();
         if (history.Count == 0)
+        {
+            AddDebugLog("WARN", "Undo requested but history is empty.");
             return;
+        }
 
         var mostRecent = history
             .OrderByDescending(x => ParseTimestamp(x.Timestamp))
@@ -2317,6 +2580,7 @@ public class MainWindow : Window, IDisposable
 
         history.Remove(mostRecent);
         Plugin.Configuration.Save();
+        AddDebugLog("HISTORY", $"Undo removed entry: House: {mostRecent.House} | Time: {mostRecent.Timestamp} | Start Bank: {mostRecent.StartingBank} | Final Bank: {mostRecent.FinalBank} | Tips: {mostRecent.Tips} | Results: {mostRecent.Result}");
     }
 
 
@@ -2342,8 +2606,10 @@ public class MainWindow : Window, IDisposable
             finalBankInput = profile.PlayerCurrentBankInput ?? string.Empty;
             betInput = profile.PlayerBetInput ?? string.Empty;
             houseInput = profile.PlayerHouseInput ?? string.Empty;
-            trackedDealerInput = profile.PlayerTrackedDealerInput ?? string.Empty;
-            playerAutoTrackEnabled = profile.PlayerAutoTrackEnabled;
+            trackedDealerInput = string.Empty;
+            playerAutoTrackEnabled = false;
+            profile.PlayerTrackedDealerInput = string.Empty;
+            profile.PlayerAutoTrackEnabled = false;
             tipsInput = string.Empty;
 
             startingBankValue = ParseBankValue(startingBankInput);
@@ -2365,6 +2631,7 @@ public class MainWindow : Window, IDisposable
             betInputHasUserEdited = ParseBankValue(profile.PlayerBetInput ?? string.Empty) > BigInteger.Zero;
             bankingInputHasUserEdited = false;
             ResetTrackerIndicatorStates();
+            Plugin.Configuration.Save();
             return;
         }
 
@@ -2423,6 +2690,7 @@ public class MainWindow : Window, IDisposable
 
     private void ClearCurrentInputs()
     {
+        AddDebugLog("UI", $"Clearing inputs for {(IsPlayerMode ? "Player" : "Dealer")} mode.");
         startingBankInput = string.Empty;
         finalBankInput = string.Empty;
         houseInput = string.Empty;
@@ -2470,6 +2738,8 @@ public class MainWindow : Window, IDisposable
         if (string.IsNullOrWhiteSpace(trimmed))
             return;
 
+        AddDebugLog("PROFILE", $"Creating profile '{trimmed}'.");
+
         foreach (var profile in Plugin.Configuration.Profiles)
         {
             if (string.Equals(profile.Name, trimmed, StringComparison.OrdinalIgnoreCase))
@@ -2498,6 +2768,7 @@ public class MainWindow : Window, IDisposable
         if (profile == null)
             return;
 
+        AddDebugLog("PROFILE", $"Deleting profile '{profile.Name}'.");
         Plugin.Configuration.Profiles.Remove(profile);
         Plugin.Configuration.ActiveProfileName = Plugin.Configuration.Profiles[0].Name;
         Plugin.Configuration.Save();
@@ -2507,12 +2778,13 @@ public class MainWindow : Window, IDisposable
 
     private void AddHistoryEntry()
     {
+        AddDebugLog("HISTORY", $"Saving history entry in {(IsDealerMode ? "Dealer" : "Player")} mode.");
         var history = GetCurrentHistory();
         string resultText = IsPlayerMode
             ? FormatSignedResult(lastPlayerBankChangeValue)
             : GetCurrentResultText();
 
-        history.Add(new HistoryEntry
+        var entry = new HistoryEntry
         {
             House = houseInput.Trim(),
             Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -2520,7 +2792,13 @@ public class MainWindow : Window, IDisposable
             FinalBank = FormatNumber(finalBankValue),
             Tips = IsPlayerMode ? string.Empty : FormatNumber(tipsValue),
             Result = resultText
-        });
+        };
+
+        history.Add(entry);
+
+        string bankLabel = IsPlayerMode ? "Total Bank" : "Final Bank";
+        string tipsSegment = IsPlayerMode ? string.Empty : $" | Tips: {entry.Tips}";
+        AddDebugLog("HISTORY", $"Entry: House: {entry.House} | Time: {entry.Timestamp} | Start Bank: {entry.StartingBank} | {bankLabel}: {entry.FinalBank}{tipsSegment} | Results: {entry.Result}");
 
         if (history.Count > 200)
             history.RemoveAt(0);
@@ -2536,6 +2814,7 @@ public class MainWindow : Window, IDisposable
 
     private void SetMode(string mode)
     {
+        AddDebugLog("MODE", $"Switching mode to {mode}.");
         bool switchingToPlayer = string.Equals(mode, "Player", StringComparison.OrdinalIgnoreCase);
         bool alreadyInRequestedMode = switchingToPlayer ? IsPlayerMode : IsDealerMode;
 
@@ -2657,11 +2936,13 @@ public class MainWindow : Window, IDisposable
 
         if (string.IsNullOrWhiteSpace(targetName))
         {
-            trackDealerButtonDisabledUntilUtc = DateTime.UtcNow.AddSeconds(3);
+            AddDebugLog("WARN", "Track Dealer failed: target not found.");
+            trackDealerButtonDisabledUntilUtc = DateTime.UtcNow.AddSeconds(5);
             return;
         }
 
         trackedDealerInput = StripWorldSuffix(targetName);
+        AddDebugLog("TRACK", $"Tracked dealer set to '{trackedDealerInput}'. Party-only monitoring {(playerAutoTrackEnabled ? "armed" : "waiting for Auto Track") }.");
         ResetTrackerIndicatorStates();
         SaveCurrentProfileValues();
     }
@@ -2670,63 +2951,181 @@ public class MainWindow : Window, IDisposable
     {
         try
         {
-            if (!IsAutoTrackingActive)
+            if (!IsPartyChatMonitoringActive)
                 return;
 
-            if (type != XivChatType.Party && type != XivChatType.CrossParty)
+            if (type != XivChatType.Party)
                 return;
+
+            if (DateTime.UtcNow >= latencyPendingUntilUtc)
+            {
+                if (latencyPendingPlayerTotal > 0)
+                    AddDebugLog("AUTO-LATENCY", "Latency pending window expired. Clearing pending tracked total.");
+                ClearPendingLatencyTrack();
+            }
 
             string trackedDealer = NormalizeLooseText(trackedDealerInput);
             if (string.IsNullOrWhiteSpace(trackedDealer))
+            {
+                AddDebugLog("AUTO", "Party chat monitoring skipped because tracked dealer is empty.");
                 return;
+            }
 
-            string senderName = NormalizeLooseText(StripWorldSuffix(sender.TextValue ?? string.Empty));
+            string senderRaw = sender.TextValue ?? string.Empty;
+            string senderName = NormalizeLooseText(StripWorldSuffix(senderRaw));
             string localPlayerName = NormalizeLooseText(Plugin.PlayerState.CharacterName ?? string.Empty);
             if (string.IsNullOrWhiteSpace(localPlayerName))
+            {
+                AddDebugLog("AUTO", "Party chat monitoring skipped because local player name is empty.");
                 return;
+            }
 
             string messageText = message.TextValue?.Replace('\n', ' ').Replace('\r', ' ').Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(messageText))
                 return;
 
+            AddDebugLog("CHAT", $"Party | Sender='{senderRaw}' | Message='{messageText}'");
+            AddDebugLog("AUTO", $"Monitoring=PartyOnly | TrackedDealer='{trackedDealer}' | SenderNormalized='{senderName}' | LocalPlayer='{localPlayerName}'");
+
             bool senderIsTrackedDealer = NamesRoughlyMatch(senderName, trackedDealer);
             bool senderIsLocalPlayer = NamesRoughlyMatch(senderName, localPlayerName);
+            AddDebugLog("AUTO", $"Sender match flags => Dealer:{senderIsTrackedDealer} | Local:{senderIsLocalPlayer}");
 
-            if (senderIsTrackedDealer && MessageStartsWithTrackedPlayer(messageText, localPlayerName))
+            if (senderIsTrackedDealer && MessageMentionsTrackedPlayer(messageText, localPlayerName) && IsDecisionPromptMessage(messageText))
+            {
                 doubleDownPromptUntilUtc = DateTime.UtcNow.AddSeconds(20);
+                trackerDoubleDownsState = TrackerIndicatorState.Detected;
+                AddDebugLog("AUTO", "Detected tracked-player decision prompt from dealer message. Double-down prompt window opened for 20s.");
+            }
 
             if (senderIsLocalPlayer && DateTime.UtcNow < doubleDownPromptUntilUtc && IsDoubleDownCallMessage(messageText))
             {
+                AddDebugLog("AUTO-DD", $"Detected local double-down call: {messageText}");
+                trackerDoubleDownsState = TrackerIndicatorState.Detected;
                 doubleDownPromptUntilUtc = DateTime.MinValue;
                 doubleDownPendingUntilUtc = DateTime.UtcNow.AddSeconds(35);
+                AddDebugLog("AUTO-DD", "Double-down pending window opened for 35s.");
                 return;
             }
 
             if (!senderIsTrackedDealer)
+            {
+                AddDebugLog("AUTO", "Party message ignored because sender is not the tracked dealer.");
                 return;
+            }
+
+            if (latencyPendingPlayerTotal > 0 &&
+                TryResolveLatencyTrackedOutcome(messageText, localPlayerName, latencyPendingPlayerTotal, out string latencyOutcome))
+            {
+                AddDebugLog("AUTO-LATENCY", $"Resolved pending player total {latencyPendingPlayerTotal} as '{latencyOutcome}'.");
+                ClearPendingLatencyTrack();
+
+                if (DateTime.UtcNow < doubleDownPendingUntilUtc &&
+                    !string.Equals(latencyOutcome, "Blackjack", StringComparison.OrdinalIgnoreCase))
+                {
+                    int latencyWinCount = string.Equals(latencyOutcome, "Win", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                    int latencyLossCount = string.Equals(latencyOutcome, "Loss", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                    int latencyPushCount = string.Equals(latencyOutcome, "Pushed", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+
+                    AddDebugLog("AUTO-DD", "Applying pending double-down resolution from latency parser.");
+                    ApplyTrackedDoubleDownOutcome(latencyWinCount, latencyLossCount, latencyPushCount);
+                    doubleDownPendingUntilUtc = DateTime.MinValue;
+                    doubleDownPromptUntilUtc = DateTime.MinValue;
+                    return;
+                }
+
+                if (string.Equals(latencyOutcome, "Blackjack", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddDebugLog("AUTO-BJ", "Applying blackjack outcome from latency parser.");
+                    ApplyTrackedBlackjackOutcome();
+                    blackjackPendingUntilUtc = DateTime.MinValue;
+                    return;
+                }
+
+                if (DateTime.UtcNow < blackjackPendingUntilUtc)
+                {
+                    AddDebugLog("AUTO-BJ", $"Resolving pending blackjack from latency parser as {latencyOutcome}.");
+                    int latencyWinCount = string.Equals(latencyOutcome, "Win", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                    int latencyLossCount = string.Equals(latencyOutcome, "Loss", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                    int latencyPushCount = string.Equals(latencyOutcome, "Pushed", StringComparison.OrdinalIgnoreCase) ? 1 : 0;
+                    ApplyTrackedBlackjackResolution(latencyWinCount, latencyLossCount, latencyPushCount);
+                    blackjackPendingUntilUtc = DateTime.MinValue;
+                    return;
+                }
+
+                if (string.Equals(latencyOutcome, "Win", StringComparison.OrdinalIgnoreCase))
+                {
+                    ApplyTrackedChatOutcome(1, 0, 0);
+                    return;
+                }
+
+                if (string.Equals(latencyOutcome, "Loss", StringComparison.OrdinalIgnoreCase))
+                {
+                    ApplyTrackedChatOutcome(0, 1, 0);
+                    return;
+                }
+
+                if (string.Equals(latencyOutcome, "Pushed", StringComparison.OrdinalIgnoreCase))
+                {
+                    ApplyTrackedChatOutcome(0, 0, 1);
+                    return;
+                }
+            }
+
+            if (TryCaptureLatencyPendingTotal(messageText, localPlayerName, out int latencyPlayerTotal))
+            {
+                latencyPendingPlayerTotal = latencyPlayerTotal;
+                latencyPendingUntilUtc = DateTime.UtcNow.AddSeconds(30);
+                AddDebugLog("AUTO-LATENCY", $"Captured pending player total {latencyPlayerTotal}. Waiting up to 30s for dealer resolution.");
+                return;
+            }
+
+            if (TryDetectTrackedBlackjackMessage(messageText, localPlayerName))
+            {
+                AddDebugLog("AUTO-BJ", "Detected blackjack mention for tracked player from dealer message. Waiting for final dealer result resolution.");
+                doubleDownPendingUntilUtc = DateTime.MinValue;
+                doubleDownPromptUntilUtc = DateTime.MinValue;
+                ClearPendingLatencyTrack();
+                blackjackPendingUntilUtc = DateTime.UtcNow.AddSeconds(35);
+                trackerBlackjacksState = TrackerIndicatorState.Detected;
+                AddDebugLog("AUTO-BJ", "Blackjack pending window opened for 35s.");
+                return;
+            }
 
             if (!TryGetTrackedOutcomeCounts(messageText, localPlayerName, out int winCount, out int lossCount, out int pushCount))
+            {
+                AddDebugLog("AUTO", "Tracked dealer party message did not contain a resolvable outcome for the local player.");
                 return;
+            }
+
+            AddDebugLog("AUTO", $"Matched tracked outcome counts - Win:{winCount} Loss:{lossCount} Push:{pushCount}.");
 
             if (DateTime.UtcNow < doubleDownPendingUntilUtc)
             {
+                AddDebugLog("AUTO-DD", "Applying pending double-down resolution.");
                 ApplyTrackedDoubleDownOutcome(winCount, lossCount, pushCount);
                 doubleDownPendingUntilUtc = DateTime.MinValue;
                 doubleDownPromptUntilUtc = DateTime.MinValue;
                 return;
             }
 
+            if (DateTime.UtcNow < blackjackPendingUntilUtc)
+            {
+                AddDebugLog("AUTO-BJ", "Applying pending blackjack resolution from direct tracked counts.");
+                ApplyTrackedBlackjackResolution(winCount, lossCount, pushCount);
+                blackjackPendingUntilUtc = DateTime.MinValue;
+                return;
+            }
+
             ApplyTrackedChatOutcome(winCount, lossCount, pushCount);
         }
-        catch
+        catch (Exception ex)
         {
-            if (DateTime.UtcNow < doubleDownPendingUntilUtc)
-                trackerDoubleDownsState = TrackerIndicatorState.Error;
-            else
-            {
-                trackerWinsState = TrackerIndicatorState.Error;
-                trackerLossesState = TrackerIndicatorState.Error;
-            }
+            AddDebugLog("ERR", $"OnChatMessage failed: {ex.GetType().Name}: {ex.Message}");
+            trackerWinsState = TrackerIndicatorState.Error;
+            trackerLossesState = TrackerIndicatorState.Error;
+            trackerBlackjacksState = TrackerIndicatorState.Error;
+            trackerDoubleDownsState = TrackerIndicatorState.Error;
         }
     }
 
@@ -2736,11 +3135,14 @@ public class MainWindow : Window, IDisposable
         lossCount = 0;
         pushCount = 0;
 
+        AddDebugLog("AUTO-PARSE", $"Parsing tracked results from: {messageText}");
+
         foreach (Match match in TrackResultRegex.Matches(messageText))
         {
             string label = match.Groups["label"].Value;
             string namesSection = match.Groups["names"].Value;
             int matchCount = CountPlayerMentions(namesSection, localPlayerName);
+            AddDebugLog("AUTO-PARSE", $"Section label='{label}' names='{namesSection}' matches={matchCount}.");
 
             if (matchCount <= 0)
                 continue;
@@ -2768,6 +3170,7 @@ public class MainWindow : Window, IDisposable
     {
         try
         {
+            AddDebugLog("AUTO-DD", $"Applying double-down outcome - Win:{winCount} Loss:{lossCount} Push:{pushCount}.");
             betValue = ParseBankValue(betInput);
             betInput = FormatNumber(betValue);
 
@@ -2797,14 +3200,18 @@ public class MainWindow : Window, IDisposable
 
             if (isPushed)
             {
+                AddDebugLog("AUTO-DD", "Double-down outcome resolved as PUSHED.");
                 lastPlayerBankChangeValue = BigInteger.Zero;
                 AddTrackedHistoryEntry("+Pushed Double-Down");
                 SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
+                trackerDoubleDownsState = TrackerIndicatorState.Done;
+                doubleDownDoneUntilUtc = DateTime.UtcNow.AddSeconds(5);
                 SaveCurrentProfileValues();
                 return;
             }
 
             BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+            AddDebugLog("AUTO-DD", $"Double-down bank delta: {FormatSignedResult(trackedResultValue)}.");
             lastPlayerBankChangeValue = trackedResultValue;
             AddTrackedHistoryEntry($"{FormatSignedResult(trackedResultValue)} Double-Down");
 
@@ -2813,6 +3220,8 @@ public class MainWindow : Window, IDisposable
             else if (trackedResultValue < BigInteger.Zero)
                 SetTemporaryCurrentBetDisplay("You Lost!", LossColor, 5);
 
+            trackerDoubleDownsState = TrackerIndicatorState.Done;
+            doubleDownDoneUntilUtc = DateTime.UtcNow.AddSeconds(5);
             SaveCurrentProfileValues();
         }
         catch
@@ -2822,6 +3231,78 @@ public class MainWindow : Window, IDisposable
         }
     }
 
+    private static bool MessageMentionsTrackedPlayer(string messageText, string normalizedPlayerName)
+    {
+        if (string.IsNullOrWhiteSpace(messageText) || string.IsNullOrWhiteSpace(normalizedPlayerName))
+            return false;
+
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (string.IsNullOrWhiteSpace(normalizedMessage))
+            return false;
+
+        foreach (string playerNameVariant in GetLocalPlayerNameVariants(normalizedPlayerName))
+        {
+            if (Regex.IsMatch(
+                    normalizedMessage,
+                    $@"\b{Regex.Escape(playerNameVariant)}\b",
+                    RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsDecisionPromptMessage(string messageText)
+    {
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (string.IsNullOrWhiteSpace(normalizedMessage))
+            return false;
+
+        return normalizedMessage.Contains("hit", StringComparison.OrdinalIgnoreCase) ||
+               normalizedMessage.Contains("stand", StringComparison.OrdinalIgnoreCase) ||
+               normalizedMessage.Contains("stay", StringComparison.OrdinalIgnoreCase) ||
+               normalizedMessage.Contains("split", StringComparison.OrdinalIgnoreCase) ||
+               normalizedMessage.Contains("double", StringComparison.OrdinalIgnoreCase) ||
+               Regex.IsMatch(normalizedMessage, @"\bdd\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+    }
+
+    private bool TryDetectTrackedBlackjackMessage(string messageText, string localPlayerName)
+    {
+        if (!MessageMentionsTrackedPlayer(messageText, localPlayerName))
+            return false;
+
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (string.IsNullOrWhiteSpace(normalizedMessage))
+            return false;
+
+        if (Regex.IsMatch(
+                normalizedMessage,
+                @"\b(?:[1-9]|[1-9][0-9]|100)\s+bjs?\b|\bgot\s+(?:[1-9]|[1-9][0-9]|100)\s+bjs?\b|\bhad\s+(?:[1-9]|[1-9][0-9]|100)\s+bjs?\b|\bstealing\s+all\s+bjs?\b",
+                RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            AddDebugLog("AUTO-BJ", $"Ignoring blackjack stage-1 false positive dealer message: {messageText}");
+            return false;
+        }
+
+        foreach (string keyword in BlackjackStageOneKeywords)
+        {
+            if (normalizedMessage.Contains(keyword, StringComparison.OrdinalIgnoreCase))
+            {
+                AddDebugLog("AUTO-BJ", $"Blackjack stage-1 keyword matched: '{keyword}' in dealer message: {messageText}");
+                return true;
+            }
+        }
+
+        if (Regex.IsMatch(normalizedMessage, @"\bbj\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant))
+        {
+            AddDebugLog("AUTO-BJ", $"Blackjack stage-1 keyword matched: 'bj' in dealer message: {messageText}");
+            return true;
+        }
+
+        return false;
+    }
     private static bool MessageStartsWithTrackedPlayer(string messageText, string normalizedPlayerName)
     {
         if (string.IsNullOrWhiteSpace(messageText) || string.IsNullOrWhiteSpace(normalizedPlayerName))
@@ -2880,14 +3361,214 @@ public class MainWindow : Window, IDisposable
         if (normalizedMessage.Contains("fuck it dd", StringComparison.OrdinalIgnoreCase))
             return true;
 
+        if (normalizedMessage.Contains("dd", StringComparison.OrdinalIgnoreCase))
+            return true;
+
         var parts = normalizedMessage.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         return parts.Any(x => string.Equals(x, "dd", StringComparison.OrdinalIgnoreCase));
+    }
+
+
+    private void ClearPendingLatencyTrack()
+    {
+        if (latencyPendingPlayerTotal != 0 || latencyPendingUntilUtc != DateTime.MinValue)
+            AddDebugLog("AUTO-LATENCY", $"Clearing pending latency track (total={latencyPendingPlayerTotal}).");
+        latencyPendingPlayerTotal = 0;
+        latencyPendingUntilUtc = DateTime.MinValue;
+    }
+
+    private bool TryCaptureLatencyPendingTotal(string messageText, string localPlayerName, out int playerTotal)
+    {
+        playerTotal = 0;
+
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (string.IsNullOrWhiteSpace(normalizedMessage) || string.IsNullOrWhiteSpace(localPlayerName))
+            return false;
+
+        Match directMatch = Regex.Match(
+            normalizedMessage,
+            $@"\b{Regex.Escape(localPlayerName)}\s+(?<value>\d{{1,2}})\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        if (!directMatch.Success || !int.TryParse(directMatch.Groups["value"].Value, out playerTotal))
+            return false;
+
+        bool valid = playerTotal >= 1 && playerTotal <= 40;
+        if (valid)
+            AddDebugLog("AUTO-LATENCY", $"Captured possible player total {playerTotal} from message: {messageText}");
+        return valid;
+    }
+
+    private bool TryResolveLatencyTrackedOutcome(string messageText, string localPlayerName, int pendingPlayerTotal, out string outcome)
+    {
+        outcome = string.Empty;
+
+        string normalizedMessage = NormalizeLooseText(messageText);
+        if (string.IsNullOrWhiteSpace(normalizedMessage) || string.IsNullOrWhiteSpace(localPlayerName))
+            return false;
+
+        Match dealerMatch = Regex.Match(
+            normalizedMessage,
+            @"\bdealer\s+(?<dealer>\d{1,2})\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        if (!dealerMatch.Success || !int.TryParse(dealerMatch.Groups["dealer"].Value, out int dealerTotal))
+            return false;
+
+        if (dealerTotal < 1 || dealerTotal > 21)
+            return false;
+
+        bool playerBusted = Regex.IsMatch(
+            normalizedMessage,
+            $@"\b{Regex.Escape(localPlayerName)}\b.*\b(?:bust|busted)\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        bool playerTotalMatches = Regex.IsMatch(
+            normalizedMessage,
+            $@"\b{Regex.Escape(localPlayerName)}\s+{pendingPlayerTotal}\b",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+        if (!playerBusted && !playerTotalMatches)
+            return false;
+
+        if (playerBusted || pendingPlayerTotal > 21 || pendingPlayerTotal < dealerTotal)
+        {
+            AddDebugLog("AUTO-LATENCY", $"Latency resolution => LOSS | pending={pendingPlayerTotal} dealer={dealerTotal} busted={playerBusted}.");
+            outcome = "Loss";
+            return true;
+        }
+
+        if (pendingPlayerTotal == 21 && dealerTotal < 21)
+        {
+            AddDebugLog("AUTO-LATENCY", $"Latency resolution => BLACKJACK | pending={pendingPlayerTotal} dealer={dealerTotal}.");
+            outcome = "Blackjack";
+            return true;
+        }
+
+        if (pendingPlayerTotal > dealerTotal)
+        {
+            AddDebugLog("AUTO-LATENCY", $"Latency resolution => WIN | pending={pendingPlayerTotal} dealer={dealerTotal}.");
+            outcome = "Win";
+            return true;
+        }
+
+        if (pendingPlayerTotal == dealerTotal)
+        {
+            AddDebugLog("AUTO-LATENCY", $"Latency resolution => PUSHED | pending={pendingPlayerTotal} dealer={dealerTotal}.");
+            outcome = "Pushed";
+            return true;
+        }
+
+        return false;
+    }
+
+    private void ApplyTrackedBlackjackResolution(int winCount, int lossCount, int pushCount)
+    {
+        try
+        {
+            trackerBlackjacksState = TrackerIndicatorState.Detected;
+            AddDebugLog("AUTO-BJ", $"Resolving blackjack follow-up - Win:{winCount} Loss:{lossCount} Push:{pushCount}.");
+
+            int netCount = winCount - lossCount;
+            bool isPurePush = pushCount > 0 && winCount == 0 && lossCount == 0;
+            bool isBalancedPush = netCount == 0 && (winCount > 0 || lossCount > 0);
+            bool isPushed = isPurePush || isBalancedPush;
+
+            if (isPushed)
+            {
+                AddDebugLog("AUTO-BJ", "Blackjack follow-up resolved as PUSHED.");
+                lastPlayerBankChangeValue = BigInteger.Zero;
+                AddTrackedHistoryEntry("+Pushed Blackjack");
+                SetTemporaryCurrentBetDisplay("Blackjack Pushed!", BlackjackColor, 5);
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            if (netCount > 0)
+            {
+                AddDebugLog("AUTO-BJ", "Blackjack follow-up resolved as WIN.");
+                ApplyTrackedBlackjackOutcome();
+                return;
+            }
+
+            if (netCount < 0)
+            {
+                AddDebugLog("AUTO-BJ", "Blackjack follow-up resolved as LOSS.");
+                betValue = ParseBankValue(betInput);
+                betInput = FormatNumber(betValue);
+
+                if (betValue <= BigInteger.Zero)
+                {
+                    SaveCurrentProfileValues();
+                    return;
+                }
+
+                if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+                    finalBankValue = startingBankValue;
+
+                BigInteger oldCurrentBankValue = finalBankValue;
+                finalBankValue = BigInteger.Max(BigInteger.Zero, finalBankValue - betValue);
+                finalBankInput = FormatNumber(finalBankValue);
+                lastPlayerBankChangeValue = finalBankValue - oldCurrentBankValue;
+
+                AddTrackedHistoryEntry($"{FormatSignedResult(lastPlayerBankChangeValue)} Blackjack");
+                SetTemporaryCurrentBetDisplay("Blackjack Lost!", LossColor, 5);
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            AddDebugLog("AUTO-BJ", "Blackjack follow-up had no resolvable net outcome.");
+        }
+        catch
+        {
+            trackerBlackjacksState = TrackerIndicatorState.Error;
+            throw;
+        }
+    }
+
+    private void ApplyTrackedBlackjackOutcome()
+    {
+        try
+        {
+            trackerBlackjacksState = TrackerIndicatorState.Detected;
+            AddDebugLog("AUTO-BJ", "Applying tracked blackjack outcome.");
+            betValue = ParseBankValue(betInput);
+            betInput = FormatNumber(betValue);
+
+            if (betValue <= BigInteger.Zero)
+            {
+                SaveCurrentProfileValues();
+                return;
+            }
+
+            if (finalBankValue == BigInteger.Zero && startingBankValue > BigInteger.Zero && string.IsNullOrWhiteSpace(finalBankInput))
+                finalBankValue = startingBankValue;
+
+            int multiplierIndex = Math.Clamp(natbjMultiplierIndex, 0, BlackjackMultiplierTenths.Length - 1);
+            BigInteger payout = (betValue * BlackjackMultiplierTenths[multiplierIndex]) / 10;
+            BigInteger oldCurrentBankValue = finalBankValue;
+
+            finalBankValue += payout;
+            finalBankInput = FormatNumber(finalBankValue);
+            lastPlayerBankChangeValue = finalBankValue - oldCurrentBankValue;
+
+            AddDebugLog("AUTO-BJ", $"Blackjack payout delta: +{FormatNumber(payout)}.");
+            AddBlackjackHistoryEntry(payout);
+            SetTemporaryCurrentBetDisplay("Blackjack!", BlackjackColor, 5);
+            SaveCurrentProfileValues();
+        }
+        catch
+        {
+            trackerBlackjacksState = TrackerIndicatorState.Error;
+            throw;
+        }
     }
 
     private void ApplyTrackedChatOutcome(int winCount, int lossCount, int pushCount)
     {
         try
         {
+            AddDebugLog("AUTO", $"Applying tracked outcome - Win:{winCount} Loss:{lossCount} Push:{pushCount}.");
             betValue = ParseBankValue(betInput);
             betInput = FormatNumber(betValue);
 
@@ -2915,6 +3596,7 @@ public class MainWindow : Window, IDisposable
 
             if (isPushed)
             {
+                AddDebugLog("AUTO", "Tracked outcome resolved as PUSHED.");
                 lastPlayerBankChangeValue = BigInteger.Zero;
                 AddTrackedHistoryEntry("Pushed");
                 SetTemporaryCurrentBetDisplay("Bet Pushed!", ProfitColor, 5);
@@ -2923,6 +3605,7 @@ public class MainWindow : Window, IDisposable
             }
 
             BigInteger trackedResultValue = finalBankValue - oldCurrentBankValue;
+            AddDebugLog("AUTO", $"Tracked outcome bank delta: {FormatSignedResult(trackedResultValue)}.");
             lastPlayerBankChangeValue = trackedResultValue;
             AddTrackedHistoryEntry(FormatSignedResult(trackedResultValue));
 
@@ -2947,6 +3630,7 @@ public class MainWindow : Window, IDisposable
     {
         var history = GetCurrentHistory();
 
+        AddDebugLog("HISTORY", $"Adding tracked history entry: {resultText}.");
         history.Add(new HistoryEntry
         {
             House = houseInput.Trim(),
@@ -2965,6 +3649,7 @@ public class MainWindow : Window, IDisposable
 
     private void SetTemporaryCurrentBetDisplay(string text, Vector4 color, int seconds)
     {
+        AddDebugLog("UI", $"Setting temporary bet display to '{text}' for {seconds}s.");
         currentBetDisplayOverrideText = text;
         currentBetDisplayOverrideColor = color;
         currentBetDisplayOverrideUntilUtc = DateTime.UtcNow.AddSeconds(seconds);
@@ -3003,6 +3688,23 @@ public class MainWindow : Window, IDisposable
         return labels.Any(x => string.Equals(x, label, StringComparison.OrdinalIgnoreCase));
     }
 
+    private static IEnumerable<string> GetLocalPlayerNameVariants(string normalizedPlayerName)
+    {
+        if (string.IsNullOrWhiteSpace(normalizedPlayerName))
+            yield break;
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        if (seen.Add(normalizedPlayerName))
+            yield return normalizedPlayerName;
+
+        foreach (string part in normalizedPlayerName.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (seen.Add(part))
+                yield return part;
+        }
+    }
+
     private static int CountPlayerMentions(string namesSection, string normalizedPlayerName)
     {
         if (string.IsNullOrWhiteSpace(namesSection) || string.IsNullOrWhiteSpace(normalizedPlayerName))
@@ -3013,22 +3715,32 @@ public class MainWindow : Window, IDisposable
             return 0;
 
         int count = 0;
-        int index = 0;
 
-        while (true)
+        foreach (string playerNameVariant in GetLocalPlayerNameVariants(normalizedPlayerName))
         {
-            index = normalizedSection.IndexOf(normalizedPlayerName, index, StringComparison.OrdinalIgnoreCase);
-            if (index < 0)
+            int index = 0;
+
+            while (true)
+            {
+                index = normalizedSection.IndexOf(playerNameVariant, index, StringComparison.OrdinalIgnoreCase);
+                if (index < 0)
+                    break;
+
+                bool validLeft = index == 0 || normalizedSection[index - 1] == ' ';
+                int endIndex = index + playerNameVariant.Length;
+                bool validRight = endIndex >= normalizedSection.Length || normalizedSection[endIndex] == ' ';
+
+                if (validLeft && validRight)
+                {
+                    count++;
+                    break;
+                }
+
+                index = endIndex;
+            }
+
+            if (count > 0)
                 break;
-
-            bool validLeft = index == 0 || normalizedSection[index - 1] == ' ';
-            int endIndex = index + normalizedPlayerName.Length;
-            bool validRight = endIndex >= normalizedSection.Length || normalizedSection[endIndex] == ' ';
-
-            if (validLeft && validRight)
-                count++;
-
-            index = endIndex;
         }
 
         return count;
@@ -3278,13 +3990,19 @@ public class MainWindow : Window, IDisposable
         bool hasActiveShift = TryGetCurrentDealerShiftStart().HasValue;
 
         if (DrawStyledBoldButton("Start Shift", "DealerStartShiftButton", new Vector2(92f, 0f), DealerButtonColor))
+        {
+            AddDebugLog("UI", "Dealer checkpoint button clicked: Start Shift.");
             AddDealerCheckpoint("Start Shift");
+        }
 
         ImGui.SameLine();
         if (!hasActiveShift || isOnBreak)
             ImGui.BeginDisabled();
         if (DrawStyledBoldButton("Break", "DealerBreakButton", new Vector2(70f, 0f), DealerBreakColor, WhiteText))
+        {
+            AddDebugLog("UI", "Dealer checkpoint button clicked: Break.");
             AddDealerCheckpoint("Break");
+        }
         if (!hasActiveShift || isOnBreak)
             ImGui.EndDisabled();
 
@@ -3292,7 +4010,10 @@ public class MainWindow : Window, IDisposable
         if (!hasActiveShift || !isOnBreak)
             ImGui.BeginDisabled();
         if (DrawStyledBoldButton("Resume", "DealerResumeButton", new Vector2(78f, 0f), DealerResumeColor, WhiteText))
+        {
+            AddDebugLog("UI", "Dealer checkpoint button clicked: Resume.");
             AddDealerCheckpoint("Resume");
+        }
         if (!hasActiveShift || !isOnBreak)
             ImGui.EndDisabled();
 
@@ -3300,7 +4021,10 @@ public class MainWindow : Window, IDisposable
         if (!hasActiveShift)
             ImGui.BeginDisabled();
         if (DrawStyledBoldButton("End Shift", "DealerEndShiftButton", new Vector2(90f, 0f), LossButtonColor, WhiteText))
+        {
+            AddDebugLog("UI", "Dealer checkpoint button clicked: End Shift.");
             AddDealerCheckpoint("End Shift");
+        }
         if (!hasActiveShift)
             ImGui.EndDisabled();
     }
@@ -3309,6 +4033,7 @@ public class MainWindow : Window, IDisposable
     {
         tipsValue += amount;
         tipsInput = FormatNumber(tipsValue);
+        AddDebugLog("UI", $"Quick tip button applied: +{FormatNumber(amount)} | New Tips Total: {tipsInput}");
         SaveCurrentProfileValues();
     }
 
@@ -3316,7 +4041,7 @@ public class MainWindow : Window, IDisposable
     {
         var history = GetCurrentHistory();
 
-        history.Add(new HistoryEntry
+        var entry = new HistoryEntry
         {
             House = houseInput.Trim(),
             Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -3324,11 +4049,14 @@ public class MainWindow : Window, IDisposable
             FinalBank = FormatNumber(finalBankValue),
             Tips = FormatNumber(tipsValue),
             Result = checkpointName
-        });
+        };
+
+        history.Add(entry);
 
         if (history.Count > 200)
             history.RemoveAt(0);
 
+        AddDebugLog("HISTORY", $"Checkpoint entry saved: House: {entry.House} | Time: {entry.Timestamp} | Start Bank: {entry.StartingBank} | Final Bank: {entry.FinalBank} | Tips: {entry.Tips} | Results: {entry.Result}");
         Plugin.Configuration.Save();
 
         if (string.Equals(checkpointName, "End Shift", StringComparison.OrdinalIgnoreCase) && Plugin.Configuration.DealerAutoBackupOnEndShift)
@@ -3546,7 +4274,7 @@ public class MainWindow : Window, IDisposable
     {
         var history = GetCurrentHistory();
 
-        history.Add(new HistoryEntry
+        var entry = new HistoryEntry
         {
             House = houseInput.Trim(),
             Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
@@ -3554,11 +4282,14 @@ public class MainWindow : Window, IDisposable
             FinalBank = FormatNumber(finalBankValue),
             Tips = IsPlayerMode ? string.Empty : FormatNumber(tipsValue),
             Result = "Backup"
-        });
+        };
+
+        history.Add(entry);
 
         if (history.Count > 200)
             history.RemoveAt(0);
 
+        AddDebugLog("HISTORY", $"Backup entry saved: House: {entry.House} | Time: {entry.Timestamp} | Start Bank: {entry.StartingBank} | Final Bank: {entry.FinalBank} | Tips: {entry.Tips} | Results: {entry.Result}");
         Plugin.Configuration.Save();
     }
 
@@ -3975,6 +4706,7 @@ public class MainWindow : Window, IDisposable
         if (GetCurrentHistory().Count == 0)
             return;
 
+        AddDebugLog("UI", "Auto daily dealer backup triggered.");
         AddBackupHistoryEntry();
         ExportCurrentHistory(false, true, "DailyBackup");
         ExportCurrentHistory(true, true, "DailyBackup");

@@ -5,7 +5,7 @@
     "Punchline": "Easily keep track of your Start/Final bank and results.",
     "Description": "Simple and fast way to know your night gamba results.",
     "InternalName": "GambaBank",
-    "AssemblyVersion": "1.0.3.3",
+    "AssemblyVersion": "1.0.3.4",
     "RepoUrl": "https://github.com/seventity7/GambaBank",
     "ApplicableVersion": "any",
     "DalamudApiLevel": 14,

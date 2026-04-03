@@ -1,5 +1,5 @@
 ## `Changelog 1.0.3 - March 31-2026`
-`+Minor follow up 1.0.3.1/1.0.3.2/1.0.3.3 Apr 01 > Apr 02-2026`
+`+Minor follow up 1.0.3.1/1.0.3.2/1.0.3.3/1.0.3.4 Apr 01 > Apr 03-2026`
 
 ## **✨ Added:**
 

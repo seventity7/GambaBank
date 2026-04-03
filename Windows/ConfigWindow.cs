@@ -39,6 +39,7 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.IsConfigWindowMovable = movable;
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Config checkbox changed: Movable={movable}");
         }
 
         var autoClear = Plugin.Configuration.AutoClearAfterCopy;
@@ -46,6 +47,7 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.AutoClearAfterCopy = autoClear;
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Config checkbox changed: AutoClearAfterCopy={autoClear}");
         }
 
         var autoBackupEndShift = Plugin.Configuration.DealerAutoBackupOnEndShift;
@@ -53,6 +55,7 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.DealerAutoBackupOnEndShift = autoBackupEndShift;
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Config checkbox changed: DealerAutoBackupOnEndShift={autoBackupEndShift}");
         }
 
         var autoDailyBackup = Plugin.Configuration.DealerAutoDailyBackup;
@@ -60,6 +63,7 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.DealerAutoDailyBackup = autoDailyBackup;
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Config checkbox changed: DealerAutoDailyBackup={autoDailyBackup}");
         }
 
         ImGui.Spacing();
@@ -70,12 +74,14 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.DealerBackupDirectory = backupDirectory;
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Dealer backup directory changed to '{backupDirectory}'");
         }
 
         if (ImGui.Button("Use Desktop"))
         {
             Plugin.Configuration.DealerBackupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Dealer backup directory set to Desktop: '{Plugin.Configuration.DealerBackupDirectory}'");
         }
 
         ImGui.SameLine();
@@ -83,6 +89,7 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.DealerBackupDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", $"Dealer backup directory set to Documents: '{Plugin.Configuration.DealerBackupDirectory}'");
         }
 
         ImGui.SameLine();
@@ -90,6 +97,7 @@ public class ConfigWindow : Window, IDisposable
         {
             Plugin.Configuration.DealerBackupDirectory = string.Empty;
             Plugin.Configuration.Save();
+            DebugHub.Add("CONFIG", "Dealer backup directory cleared.");
         }
 
         ImGui.Spacing();
@@ -117,6 +125,7 @@ public class ConfigWindow : Window, IDisposable
                 {
                     Plugin.Configuration.ResultsLabel = resultsLabelBuffer;
                     Plugin.Configuration.Save();
+                    DebugHub.Add("CONFIG", $"Results label updated to '{resultsLabelBuffer}'");
                 }
 
                 ImGui.TableSetColumnIndex(2);
@@ -128,6 +137,7 @@ public class ConfigWindow : Window, IDisposable
                 {
                     Plugin.Configuration.StartingLabel = startingLabelBuffer;
                     Plugin.Configuration.Save();
+                    DebugHub.Add("CONFIG", $"Starting label updated to '{startingLabelBuffer}'");
                 }
 
                 ImGui.TableNextRow();
@@ -141,6 +151,7 @@ public class ConfigWindow : Window, IDisposable
                 {
                     Plugin.Configuration.FinalLabel = finalLabelBuffer;
                     Plugin.Configuration.Save();
+                    DebugHub.Add("CONFIG", $"Final label updated to '{finalLabelBuffer}'");
                 }
 
                 ImGui.EndTable();
