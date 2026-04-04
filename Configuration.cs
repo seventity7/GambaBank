@@ -126,6 +126,10 @@ public class ProfileData
     public List<HistoryEntry> DealerHistory { get; set; } = new();
     public List<HistoryEntry> PlayerHistory { get; set; } = new();
 
+    // Dealer turn logs
+    public bool DealerTurnLogsEnabled { get; set; } = false;
+    public List<DealerTurnLogEntry> DealerTurnLogEntries { get; set; } = new();
+
     public void EnsureInitialized()
     {
         if (DealerHistory.Count == 0 && History.Count > 0)
@@ -137,6 +141,10 @@ public class ProfileData
         {
             PlayerCurrentBankInput = PlayerStartingBankInput;
         }
+
+        DealerTurnLogEntries ??= new();
+        foreach (var entry in DealerTurnLogEntries)
+            entry.EnsureInitialized();
     }
 }
 
@@ -149,4 +157,32 @@ public class HistoryEntry
     public string FinalBank { get; set; } = string.Empty;
     public string Tips { get; set; } = string.Empty;
     public string Result { get; set; } = string.Empty;
+}
+
+
+[Serializable]
+public class DealerTurnLogEntry
+{
+    public string House { get; set; } = string.Empty;
+    public bool HouseEditedManually { get; set; } = false;
+    public string PlayerName { get; set; } = string.Empty;
+    public string JoinedTimestamp { get; set; } = string.Empty;
+    public string LeftTimestamp { get; set; } = string.Empty;
+    public string TotalReceivedGil { get; set; } = "0";
+    public string TotalSentGil { get; set; } = "0";
+    public string ChatExportFilePath { get; set; } = string.Empty;
+    public string TradeExportFilePath { get; set; } = string.Empty;
+    public List<string> ChatLines { get; set; } = new();
+    public List<string> TradeLines { get; set; } = new();
+
+    public void EnsureInitialized()
+    {
+        House ??= string.Empty;
+        ChatExportFilePath ??= string.Empty;
+        TradeExportFilePath ??= string.Empty;
+        ChatLines ??= new();
+        TradeLines ??= new();
+        TotalReceivedGil ??= "0";
+        TotalSentGil ??= "0";
+    }
 }

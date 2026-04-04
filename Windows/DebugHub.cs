@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Linq;
 
 namespace GambaBank;
 
@@ -23,7 +22,10 @@ public static class DebugHub
 
         try
         {
-            Plugin.Log.Information(line);
+            if (string.Equals(category, "ERR", StringComparison.OrdinalIgnoreCase))
+                Plugin.Log.Error(line);
+            else if (string.Equals(category, "WARN", StringComparison.OrdinalIgnoreCase))
+                Plugin.Log.Warning(line);
         }
         catch
         {

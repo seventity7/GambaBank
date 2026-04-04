@@ -6,10 +6,12 @@ using System.IO;
 using System.Linq;
 using System.Numerics;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using Dalamud.Bindings.ImGui;
 using Dalamud.Game.Text;
 using Dalamud.Game.Text.SeStringHandling;
+using Dalamud.Plugin.Services;
 using Dalamud.Interface.Windowing;
 
 namespace GambaBank.Windows;
@@ -54,6 +56,8 @@ public class MainWindow : Window, IDisposable
     private string currentBetDisplayOverrideText = string.Empty;
     private Vector4 currentBetDisplayOverrideColor = new(1f, 1f, 1f, 1f);
 
+    private DateTime addBankButtonInvalidUntilUtc = DateTime.MinValue;
+
     private int latencyPendingPlayerTotal;
     private DateTime latencyPendingUntilUtc = DateTime.MinValue;
 
@@ -65,6 +69,15 @@ public class MainWindow : Window, IDisposable
         Done,
         Error
     }
+
+    private sealed class StatusTextTransitionState
+    {
+        public string CurrentText = string.Empty;
+        public string PendingTargetText = string.Empty;
+        public DateTime TransitionStartedUtc = DateTime.MinValue;
+    }
+
+    private readonly Dictionary<string, StatusTextTransitionState> animatedStatusTexts = new(StringComparer.OrdinalIgnoreCase);
 
     private TrackerIndicatorState trackerWinsState = TrackerIndicatorState.Off;
     private TrackerIndicatorState trackerLossesState = TrackerIndicatorState.Off;
@@ -81,10 +94,42 @@ public class MainWindow : Window, IDisposable
     private bool dealerExportFailed;
     private bool showDealerShiftSummaryWindow;
     private bool showDealerHistoryDetailWindow;
+    private bool showDealerTurnLogHistoryWindow;
+    private DateTime nextDealerTurnLogPartySyncUtc = DateTime.MinValue;
+    private DateTime dealerTurnLogExportStatusUntilUtc = DateTime.MinValue;
+    private string dealerTurnLogExportStatusText = string.Empty;
+    private string dealerTurnLogExportStatusPath = string.Empty;
+    private bool dealerTurnLogExportStatusFailed;
+    private string dealerTurnLogPendingTradePlayer = string.Empty;
+    private bool dealerTurnLogPendingTradeInitiatedByLocal;
+    private DateTime dealerTurnLogPendingTradeUntilUtc = DateTime.MinValue;
+    private DateTime dealerTurnLogsRequirePartyMessageUntilUtc = DateTime.MinValue;
+    private bool dealerTurnLogPartyPreviouslyActive;
+    private readonly Dictionary<string, DateTime> dealerTurnLogLastSeenUtc = new(StringComparer.OrdinalIgnoreCase);
     private HistoryEntry? selectedDealerHistoryEntry;
     private string selectedDealerHistoryDetailId = string.Empty;
     private bool showHistoryExportDirectoryPopup;
     private string historyExportDirectoryInput = string.Empty;
+    private bool openDealerTurnLogDirectoryBrowserNextFrame;
+    private bool openDealerTurnLogHouseEditPopupNextFrame;
+    private DealerTurnLogEntry? dealerTurnLogEditingHouseEntry;
+    private string dealerTurnLogHouseEditInput = string.Empty;
+    private string dealerTurnLogBulkHouseInput = string.Empty;
+    private string dealerTurnLogSortBy = "Most Recent";
+    private string dealerTurnLogSearchInput = string.Empty;
+    private readonly HashSet<string> selectedDealerTurnLogRowKeys = new(StringComparer.OrdinalIgnoreCase);
+    private string lastDealerTurnLogSelectedRowKey = string.Empty;
+    private string dealerTurnLogDirectoryBrowserCurrentPath = string.Empty;
+    private string dealerTurnLogDirectoryBrowserSelectedPath = string.Empty;
+    private string dealerTurnLogDirectoryBrowserSearchInput = string.Empty;
+    private string dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+    private readonly Dictionary<string, string> dealerTurnLogDeletedState = new(StringComparer.OrdinalIgnoreCase);
+    private bool dealerTurnLogDeletedStateLoaded;
+    private readonly HashSet<string> pendingDealerTurnLogChatFileWrites = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> pendingDealerTurnLogTradeFileWrites = new(StringComparer.OrdinalIgnoreCase);
+    private DateTime nextDealerTurnLogFileFlushUtc = DateTime.MinValue;
+    private bool dealerTurnLogConfigurationDirty;
+    private DateTime nextDealerTurnLogConfigurationSaveUtc = DateTime.MinValue;
     private readonly HashSet<string> collapsedHistoryDateGroups = new(StringComparer.OrdinalIgnoreCase);
 
     private DateTime doubleDownPromptUntilUtc = DateTime.MinValue;
@@ -126,6 +171,19 @@ public class MainWindow : Window, IDisposable
     };
 
     private static readonly Regex TrackResultRegex = BuildTrackResultRegex();
+    private static readonly Regex TradeRequestFromPlayerRegex = new(@"^(?<name>.+?) (?:would like|wishes) to trade with you\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeRequestFromLocalRegex = new(@"^(?:You (?:request|requested) a trade with|Trade request sent to) (?<name>.+?)\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeAwaitingConfirmationRegex = new(@"^Awaiting trade confirmation from (?<name>.+?)\.{3}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeSentNamedRegex = new(@"^You (?:trade|traded|give|gave|send|sent|hand over|handed over) (?<amount>[\d\.,]+) gil to (?<name>.+?)\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeReceivedNamedRegex = new(@"^(?<name>.+?) (?:trade|traded|give|gave|send|sent|hand|handed)s? you (?<amount>[\d\.,]+) gil\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeSentPendingRegex = new(@"^You (?:trade|traded|give|gave|send|sent|hand over|handed over) (?<amount>[\d\.,]+) gil\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeReceivedPendingRegex = new(@"^You (?:receive|received|got|get) (?<amount>[\d\.,]+) gil(?: from (?<name>.+?))?\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeReceivedPassiveRegex = new(@"^(?<name>.+?) (?:receive|received|got|get)s? (?<amount>[\d\.,]+) gil from you\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeOfferLocalNamedRegex = new(@"^You (?:offer|offered|offers|put up|puts up|add|added|adds|set|sets) (?<amount>[\d\.,]+) gil(?: for trade)?(?: to (?<name>.+?))?\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeOfferPlayerNamedRegex = new(@"^(?<name>.+?) (?:offer|offered|offers|put up|puts up|add|added|adds|set|sets) (?<amount>[\d\.,]+) gil(?: for trade)?(?: to you)?\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeGiveLocalNamedRegex = new(@"^You (?:give|gave|hand|handed|hands|pass|passed|passes) (?<amount>[\d\.,]+) gil to (?<name>.+?)\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeGivePlayerNamedRegex = new(@"^(?<name>.+?) (?:give|gave|gives|hand|handed|hands|pass|passed|passes) you (?<amount>[\d\.,]+) gil\.?$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+    private static readonly Regex TradeCancelRegex = new(@"^(?:Trade cancelled\.?|Trade canceled\.?|The trade was cancelled\.?|The trade was canceled\.?|Trade request declined\.?|Trade request canceled\.?|Trade request cancelled\.?|(?<name>.+?) has declined the trade\.?|(?<name>.+?) has withdrawn the trade request\.?)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
     private static readonly string[] BlackjackMultiplierLabels = { "1.0x", "1.3x", "1.7x", "1.5x", "2.0x", "2.5x", "3.0x" };
     private static readonly int[] BlackjackMultiplierTenths = { 10, 13, 17, 15, 20, 25, 30 };
 
@@ -187,21 +245,31 @@ public class MainWindow : Window, IDisposable
         _ = DebugHub.Snapshot();
         AddDebugLog("INIT", "Background debug capture armed.");
         Plugin.ChatGui.ChatMessage += OnChatMessage;
+        Plugin.Framework.Update += OnFrameworkUpdate;
         AddDebugLog("INIT", "MainWindow initialized.");
     }
 
     public void Dispose()
     {
+        FlushPendingDealerTurnLogWrites(force: true);
+        FlushPendingDealerTurnLogConfigurationSave(force: true);
         Plugin.ChatGui.ChatMessage -= OnChatMessage;
+        Plugin.Framework.Update -= OnFrameworkUpdate;
     }
 
     public override void Draw()
     {
         DrawProfilesSection();
 
-        ImGui.Spacing();
+        if (IsPlayerMode)
+            ImGui.Dummy(new Vector2(0f, 6f));
+        else
+            ImGui.Spacing();
         ImGui.Separator();
-        ImGui.Spacing();
+        if (IsPlayerMode)
+            ImGui.Dummy(new Vector2(0f, 6f));
+        else
+            ImGui.Spacing();
 
         DrawBankFields();
 
@@ -214,17 +282,40 @@ public class MainWindow : Window, IDisposable
             DrawMessageSection();
         }
 
-        ImGui.Spacing();
+        if (IsPlayerMode)
+            ImGui.Dummy(new Vector2(0f, 8f));
+        else
+            ImGui.Spacing();
         ImGui.Separator();
-        ImGui.Spacing();
+        if (IsPlayerMode)
+            ImGui.Dummy(new Vector2(0f, 8f));
+        else
+            ImGui.Spacing();
 
         DrawHistorySection();
+
+        if (openDealerTurnLogDirectoryBrowserNextFrame)
+        {
+            openDealerTurnLogDirectoryBrowserNextFrame = false;
+            OpenDealerTurnLogDirectoryBrowser();
+        }
+
+        DrawDealerTurnLogDirectoryBrowserPopup();
+
+        if (openDealerTurnLogHouseEditPopupNextFrame)
+        {
+            openDealerTurnLogHouseEditPopupNextFrame = false;
+            ImGui.OpenPopup("##DealerTurnLogHouseEditPopup");
+        }
+
+        DrawDealerTurnLogHouseEditPopup();
 
         if (IsDealerMode)
         {
             TryAutoDailyDealerBackup();
             DrawDealerShiftSummaryWindow();
             DrawDealerHistoryDetailWindow();
+            DrawDealerTurnLogHistoryWindow();
         }
 
     }
@@ -347,7 +438,10 @@ public class MainWindow : Window, IDisposable
         DrawDealerCheckpointButtons();
         ImGui.Spacing();
 
-        if (!ImGui.BeginTable("##DealerBankFieldsTable", 5, ImGuiTableFlags.SizingFixedFit))
+        const float dealerStatusSeparatorWidth = 14f;
+        const float dealerStatusColumnWidth = 430f;
+
+        if (!ImGui.BeginTable("##DealerBankFieldsTable", 7, ImGuiTableFlags.SizingFixedFit))
             return;
 
         ImGui.TableSetupColumn("Label1", ImGuiTableColumnFlags.WidthFixed, 95f);
@@ -355,6 +449,8 @@ public class MainWindow : Window, IDisposable
         ImGui.TableSetupColumn("Label2", ImGuiTableColumnFlags.WidthFixed, 95f);
         ImGui.TableSetupColumn("Value2", ImGuiTableColumnFlags.WidthFixed, 145f);
         ImGui.TableSetupColumn("Action", ImGuiTableColumnFlags.WidthFixed, 150f);
+        ImGui.TableSetupColumn("StatusSeparator", ImGuiTableColumnFlags.WidthFixed, dealerStatusSeparatorWidth);
+        ImGui.TableSetupColumn("Status", ImGuiTableColumnFlags.WidthFixed, dealerStatusColumnWidth);
 
         ImGui.TableNextRow();
 
@@ -379,6 +475,12 @@ public class MainWindow : Window, IDisposable
             ClearCurrentInputs();
         ImGui.PopStyleVar();
 
+        ImGui.TableSetColumnIndex(5);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(6);
+        DrawDealerTrackerStatusHeader(dealerStatusColumnWidth);
+
         ImGui.TableNextRow();
 
         DrawEditableNumericCell(
@@ -398,6 +500,22 @@ public class MainWindow : Window, IDisposable
             ref tipsInput,
             ref tipsValue,
             145f);
+
+        ImGui.TableSetColumnIndex(4);
+        bool dealerTurnLogsEnabled = GetDealerTurnLogsEnabled();
+        string turnLogsButtonText = dealerTurnLogsEnabled
+            ? "● Turn logs OFF"
+            : DateTime.UtcNow < dealerTurnLogsRequirePartyMessageUntilUtc
+                ? "Create party first"
+                : "○ Turn logs ON";
+        if (DrawStyledBoldButton(turnLogsButtonText, "DealerTurnLogsToggleButton", new Vector2(144f, 0f), WithAlpha(Hex("#607da1"), 0.85f), WhiteText))
+            ToggleDealerTurnLogs();
+
+        ImGui.TableSetColumnIndex(5);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(6);
+        DrawDealerTrackerStatusTopLine(dealerStatusColumnWidth);
 
         ImGui.TableNextRow();
 
@@ -420,6 +538,12 @@ public class MainWindow : Window, IDisposable
             IncrementDealerTips(1_000_000);
         ImGui.PopStyleVar();
 
+        ImGui.TableSetColumnIndex(5);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(6);
+        DrawDealerTrackerStatusBottomLine(dealerStatusColumnWidth);
+
         ImGui.EndTable();
     }
 
@@ -432,7 +556,7 @@ public class MainWindow : Window, IDisposable
         {
             ImGui.TableSetupColumn("PlayerLeftColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
             ImGui.TableSetupColumn("PlayerCenterColumn", ImGuiTableColumnFlags.WidthFixed, 250f);
-            ImGui.TableSetupColumn("PlayerActionColumn", ImGuiTableColumnFlags.WidthFixed, 96f);
+            ImGui.TableSetupColumn("PlayerActionColumn", ImGuiTableColumnFlags.WidthFixed, 252f);
 
             ImGui.TableNextRow();
 
@@ -448,9 +572,9 @@ public class MainWindow : Window, IDisposable
             ImGui.EndTable();
         }
 
-        ImGui.Spacing();
+        ImGui.Dummy(new Vector2(0f, 8f));
         ImGui.Separator();
-        ImGui.Spacing();
+        ImGui.Dummy(new Vector2(0f, 8f));
 
         DrawSectionTitle("♯ Bet Tracking");
         ImGui.Dummy(new Vector2(0f, 2f));
@@ -505,25 +629,72 @@ public class MainWindow : Window, IDisposable
     private void DrawPlayerActionButtons()
     {
         const float actionButtonWidth = 82f;
+        const float addBankFieldWidth = 138f;
+        const float dividerWidth = 14f;
 
-        if (!ImGui.BeginTable("##PlayerActionButtonsTable", 1, ImGuiTableFlags.SizingFixedFit))
+        if (!ImGui.BeginTable("##PlayerActionButtonsTable", 3, ImGuiTableFlags.SizingFixedFit))
             return;
 
         ImGui.TableSetupColumn("PlayerActionButtonsColumn", ImGuiTableColumnFlags.WidthFixed, actionButtonWidth);
+        ImGui.TableSetupColumn("PlayerActionDividerColumn", ImGuiTableColumnFlags.WidthFixed, dividerWidth);
+        ImGui.TableSetupColumn("PlayerAddBankColumn", ImGuiTableColumnFlags.WidthFixed, addBankFieldWidth);
 
         ImGui.TableNextRow();
+
         ImGui.TableSetColumnIndex(0);
         if (DrawStyledBoldButton("Save", "SaveToHistoryButton", new Vector2(actionButtonWidth, 0f), CopyButtonColor))
             AddHistoryEntry();
 
+        ImGui.TableSetColumnIndex(1);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(2);
+        ImGui.SetNextItemWidth(addBankFieldWidth);
+        bool addBankConfirmedByEnter = ImGui.InputText("##PlayerAddBankInput", ref bankingInput, 64, ImGuiInputTextFlags.EnterReturnsTrue);
+        bool addBankInputActive = ImGui.IsItemActive();
+        bool addBankConfirmedByFocusLoss = ImGui.IsItemDeactivatedAfterEdit();
+        if (addBankConfirmedByEnter || addBankConfirmedByFocusLoss)
+        {
+            bankingValue = ParseBankValue(bankingInput);
+            bankingInput = bankingValue > BigInteger.Zero ? FormatNumber(bankingValue) : string.Empty;
+            bankingInputHasUserEdited = bankingValue > BigInteger.Zero;
+        }
+
+        if (!addBankInputActive && string.IsNullOrWhiteSpace(bankingInput))
+        {
+            Vector2 placeholderPos = ImGui.GetItemRectMin() + new Vector2(8f, 3f);
+            ImGui.GetWindowDrawList().AddText(placeholderPos, ImGui.GetColorU32(LossColor), "Type bank here");
+        }
+
         ImGui.TableNextRow();
+
         ImGui.TableSetColumnIndex(0);
         if (DrawStyledBoldButton("Clear", "PlayerClearButton", new Vector2(actionButtonWidth, 0f), LossButtonColor, WhiteText))
             ClearCurrentInputs();
 
+        ImGui.TableSetColumnIndex(1);
+        DrawMiniVerticalSeparator();
+
+        ImGui.TableSetColumnIndex(2);
+        string addBankButtonText = DateTime.UtcNow < addBankButtonInvalidUntilUtc ? "Type in first" : "Add Bank";
+        if (DrawStyledBoldButton(addBankButtonText, "PlayerAddBankButton", new Vector2(addBankFieldWidth, 0f), CopyButtonColor, WhiteText))
+        {
+            bankingValue = ParseBankValue(bankingInput);
+            bankingInput = bankingValue > BigInteger.Zero ? FormatNumber(bankingValue) : string.Empty;
+            bankingInputHasUserEdited = bankingValue > BigInteger.Zero;
+
+            if (bankingValue <= BigInteger.Zero)
+            {
+                addBankButtonInvalidUntilUtc = DateTime.UtcNow.AddSeconds(3);
+            }
+            else
+            {
+                ApplyBankingAdjustment();
+            }
+        }
+
         ImGui.EndTable();
     }
-
 
 
 
@@ -708,13 +879,21 @@ public class MainWindow : Window, IDisposable
             "Dealer:",
             Hex("#075B39"),
             GetDealerTrackingState(),
-            trackerStatusColumnWidth);
+            trackerStatusColumnWidth,
+            "Player");
 
         // Row 3
         ImGui.TableNextRow();
 
         ImGui.TableSetColumnIndex(0);
         ImGui.Dummy(Vector2.Zero);
+
+        if (playerAutoTrackEnabled && string.IsNullOrWhiteSpace(trackedDealerInput))
+        {
+            playerAutoTrackEnabled = false;
+            AddDebugLog("AUTO", "Auto Track turned OFF automatically because no tracked dealer name is set.");
+            SaveCurrentProfileValues();
+        }
 
         string autoTrackText = DateTime.UtcNow < autoTrackRequireDealerUntilUtc
             ? "Track Dealer First"
@@ -785,7 +964,8 @@ public class MainWindow : Window, IDisposable
             "Double-Downs:",
             Hex("#ff42ef"),
             trackerDoubleDownsState,
-            trackerStatusColumnWidth);
+            trackerStatusColumnWidth,
+            "Player");
 
         ImGui.EndTable();
     }
@@ -975,15 +1155,16 @@ public class MainWindow : Window, IDisposable
         string rightLabel,
         Vector4 rightLabelColor,
         TrackerIndicatorState rightState,
-        float availableWidth)
+        float availableWidth,
+        string idPrefix = "Player")
     {
         const float highlightPadX = 3f;
         const float highlightPadY = 1f;
         const float segmentGap = 4f;
         const float sectionGap = 14f;
 
-        string leftValue = GetTrackerIndicatorText(leftState);
-        string rightValue = GetTrackerIndicatorText(rightState);
+        string leftValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(leftLabel)}", GetTrackerIndicatorText(leftState));
+        string rightValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(rightLabel)}", GetTrackerIndicatorText(rightState));
         Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
         Vector4 rightValueColor = GetTrackerIndicatorColor(rightState);
 
@@ -1008,16 +1189,17 @@ public class MainWindow : Window, IDisposable
         string rightLabel,
         Vector4 rightLabelColor,
         TrackerIndicatorState rightState,
-        float availableWidth)
+        float availableWidth,
+        string idPrefix = "Player")
     {
         const float highlightPadX = 3f;
         const float highlightPadY = 1f;
         const float segmentGap = 4f;
         const float sectionGap = 12f;
 
-        string leftValue = GetTrackerIndicatorText(leftState);
-        string middleValue = GetTrackerIndicatorText(middleState);
-        string rightValue = GetTrackerIndicatorText(rightState);
+        string leftValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(leftLabel)}", GetTrackerIndicatorText(leftState));
+        string middleValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(middleLabel)}", GetTrackerIndicatorText(middleState));
+        string rightValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(rightLabel)}", GetTrackerIndicatorText(rightState));
 
         Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
         Vector4 middleValueColor = GetTrackerIndicatorColor(middleState);
@@ -1042,15 +1224,16 @@ public class MainWindow : Window, IDisposable
         string middleLabel,
         Vector4 middleLabelColor,
         TrackerIndicatorState middleState,
-        float availableWidth)
+        float availableWidth,
+        string idPrefix = "Player")
     {
         const float highlightPadX = 3f;
         const float highlightPadY = 1f;
         const float segmentGap = 4f;
         const float sectionGap = 12f;
 
-        string leftValue = GetTrackerIndicatorText(leftState);
-        string middleValue = GetTrackerIndicatorText(middleState);
+        string leftValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(leftLabel)}", GetTrackerIndicatorText(leftState));
+        string middleValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(middleLabel)}", GetTrackerIndicatorText(middleState));
 
         Vector4 leftValueColor = GetTrackerIndicatorColor(leftState);
         Vector4 middleValueColor = GetTrackerIndicatorColor(middleState);
@@ -1065,6 +1248,202 @@ public class MainWindow : Window, IDisposable
 
         ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
     }
+
+    private void DrawDealerTrackerStatusHeader(float availableWidth)
+    {
+        const string text = "Tracker Status:";
+        const float contentPad = 0f;
+
+        Vector2 start = ImGui.GetCursorScreenPos();
+        Vector2 textSize = ImGui.CalcTextSize(text);
+        float rowHeight = ImGui.GetFrameHeight();
+        float textY = start.Y + MathF.Max(0f, (rowHeight - textSize.Y) * 0.5f);
+
+        var drawList = ImGui.GetWindowDrawList();
+        uint color = ImGui.ColorConvertFloat4ToU32(WhiteText);
+        Vector2 textPos = new(start.X + contentPad, textY);
+        drawList.AddText(textPos, color, text);
+        drawList.AddText(new Vector2(textPos.X + 1f, textPos.Y), color, text);
+
+        ImGui.SetCursorScreenPos(start);
+        ImGui.Dummy(new Vector2(availableWidth, rowHeight));
+    }
+
+    private void DrawDealerTrackerStatusTopLine(float availableWidth)
+    {
+        bool turnLogsEnabled = GetDealerTurnLogsEnabled();
+        int partyPlayerCount = GetDealerPartyPlayerCount();
+        bool inParty = partyPlayerCount > 0;
+
+        DrawDealerStatusLineTwo(
+            "Players:",
+            GoldColor,
+            inParty ? $"{partyPlayerCount.ToString(CultureInfo.InvariantCulture)}/8" : "Not in party",
+            inParty ? Hex("#42b6f5") : LossColor,
+            "Log History:",
+            Hex("#00c0c7"),
+            turnLogsEnabled ? "[✓]" : "[X]",
+            turnLogsEnabled ? ProfitColor : LossColor,
+            availableWidth,
+            "Dealer");
+    }
+
+    private void DrawDealerTrackerStatusBottomLine(float availableWidth)
+    {
+        bool turnLogsEnabled = GetDealerTurnLogsEnabled();
+
+        DrawDealerStatusLineTwo(
+            "Chat Log:",
+            ProfitColor,
+            turnLogsEnabled ? "[✓]" : "[X]",
+            turnLogsEnabled ? ProfitColor : LossColor,
+            "Trades Log:",
+            GoldColor,
+            turnLogsEnabled ? "[✓]" : "[X]",
+            turnLogsEnabled ? ProfitColor : LossColor,
+            availableWidth,
+            "Dealer");
+    }
+
+    private void DrawDealerStatusLineTwo(
+        string leftLabel,
+        Vector4 leftLabelColor,
+        string leftValue,
+        Vector4 leftValueColor,
+        string rightLabel,
+        Vector4 rightLabelColor,
+        string rightValue,
+        Vector4 rightValueColor,
+        float availableWidth,
+        string idPrefix = "Dealer")
+    {
+        const float highlightPadX = 3f;
+        const float highlightPadY = 1f;
+        const float segmentGap = 4f;
+        const float sectionGap = 18f;
+
+        string animatedLeftValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(leftLabel)}", leftValue);
+        string animatedRightValue = GetAnimatedStatusText($"{idPrefix}_{BuildStatusAnimationKey(rightLabel)}", rightValue);
+
+        float sectionWidth = MathF.Max(175f, (availableWidth - sectionGap) * 0.5f);
+        Vector2 start = ImGui.GetCursorScreenPos();
+        float centerY = start.Y + (ImGui.GetFrameHeight() * 0.5f);
+        float textBaseY = centerY - (ImGui.GetTextLineHeight() * 0.5f);
+
+        DrawDealerStatusSection(start.X, textBaseY, sectionWidth, leftLabel, leftLabelColor, animatedLeftValue, leftValueColor, highlightPadX, highlightPadY, segmentGap);
+        DrawDealerStatusSection(start.X + sectionWidth + sectionGap, textBaseY, sectionWidth, rightLabel, rightLabelColor, animatedRightValue, rightValueColor, highlightPadX, highlightPadY, segmentGap);
+
+        ImGui.Dummy(new Vector2(availableWidth, ImGui.GetFrameHeight()));
+    }
+
+    private static string BuildStatusAnimationKey(string label)
+    {
+        if (string.IsNullOrWhiteSpace(label))
+            return "status";
+
+        var sb = new StringBuilder(label.Length);
+        foreach (char c in label)
+        {
+            if (char.IsLetterOrDigit(c))
+                sb.Append(char.ToLowerInvariant(c));
+        }
+
+        return sb.Length == 0 ? "status" : sb.ToString();
+    }
+
+    private static bool IsAnimatedStatusPlaceholder(string text)
+    {
+        return string.Equals(text, ".", StringComparison.Ordinal) ||
+               string.Equals(text, "..", StringComparison.Ordinal) ||
+               string.Equals(text, "...", StringComparison.Ordinal);
+    }
+
+    private string GetAnimatedStatusText(string key, string targetText)
+    {
+        targetText ??= string.Empty;
+
+        if (!animatedStatusTexts.TryGetValue(key, out var state))
+        {
+            state = new StatusTextTransitionState
+            {
+                CurrentText = targetText
+            };
+            animatedStatusTexts[key] = state;
+            return state.CurrentText;
+        }
+
+        if (string.IsNullOrEmpty(state.CurrentText))
+            state.CurrentText = targetText;
+
+        if (string.IsNullOrEmpty(state.PendingTargetText))
+        {
+            if (!string.Equals(state.CurrentText, targetText, StringComparison.Ordinal))
+            {
+                state.PendingTargetText = targetText;
+                state.TransitionStartedUtc = DateTime.UtcNow;
+            }
+
+            return state.CurrentText;
+        }
+
+        if (!string.Equals(state.PendingTargetText, targetText, StringComparison.Ordinal))
+        {
+            state.PendingTargetText = targetText;
+            state.TransitionStartedUtc = DateTime.UtcNow;
+        }
+
+        double elapsedSeconds = (DateTime.UtcNow - state.TransitionStartedUtc).TotalSeconds;
+        if (elapsedSeconds < 1d)
+            return ".";
+        if (elapsedSeconds < 2d)
+            return "..";
+        if (elapsedSeconds < 3d)
+            return "...";
+
+        state.CurrentText = state.PendingTargetText;
+        state.PendingTargetText = string.Empty;
+        state.TransitionStartedUtc = DateTime.MinValue;
+        return state.CurrentText;
+    }
+    private void DrawDealerStatusSection(
+        float sectionX,
+        float textBaseY,
+        float sectionWidth,
+        string label,
+        Vector4 labelColor,
+        string value,
+        Vector4 valueColor,
+        float highlightPadX,
+        float highlightPadY,
+        float segmentGap)
+    {
+        float x = sectionX;
+        DrawHighlightedInlineTextSegment(label, labelColor, new Vector2(x, textBaseY), highlightPadX, highlightPadY);
+
+        float labelWidth = ImGui.CalcTextSize(label).X + (highlightPadX * 2f);
+        x += labelWidth + segmentGap;
+
+        DrawTrackerIndicatorValue(value, valueColor, new Vector2(x, textBaseY));
+    }
+
+    private int GetDealerPartyPlayerCount()
+    {
+        int count = 0;
+
+        for (int i = 0; i < Plugin.PartyList.Length; i++)
+        {
+            var member = Plugin.PartyList[i];
+            if (member == null)
+                continue;
+
+            string memberName = StripWorldSuffix(member.Name.TextValue ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(memberName))
+                count++;
+        }
+
+        return count;
+    }
+
 
     private void DrawTrackerStatusSection(
         float sectionX,
@@ -1093,9 +1472,34 @@ public class MainWindow : Window, IDisposable
         var drawList = ImGui.GetWindowDrawList();
         uint neutralCol = ImGui.ColorConvertFloat4ToU32(WhiteText);
         uint accentCol = ImGui.ColorConvertFloat4ToU32(accentColor);
+        uint playersBlueCol = ImGui.ColorConvertFloat4ToU32(Hex("#42b6f5"));
 
         const string openBracket = "[";
         const string closeBracket = "]";
+
+        if (IsAnimatedStatusPlaceholder(text))
+        {
+            drawList.AddText(textPos, neutralCol, text);
+            drawList.AddText(textPos + new Vector2(1f, 0f), neutralCol, text);
+            return;
+        }
+
+        if (Regex.IsMatch(text, @"^\d+/\d+$"))
+        {
+            string[] parts = text.Split('/', 2);
+            Vector2 pos = textPos;
+
+            drawList.AddText(pos, playersBlueCol, parts[0]);
+            drawList.AddText(pos + new Vector2(1f, 0f), playersBlueCol, parts[0]);
+            pos.X += ImGui.CalcTextSize(parts[0]).X;
+
+            drawList.AddText(pos, neutralCol, "/");
+            pos.X += ImGui.CalcTextSize("/").X;
+
+            drawList.AddText(pos, playersBlueCol, parts[1]);
+            drawList.AddText(pos + new Vector2(1f, 0f), playersBlueCol, parts[1]);
+            return;
+        }
 
         if (text.StartsWith("[✓]", StringComparison.Ordinal) || text.StartsWith("[X]", StringComparison.Ordinal))
         {
@@ -1260,6 +1664,9 @@ public class MainWindow : Window, IDisposable
         sb.AppendLine($"Sort: {sortBy}");
         sb.AppendLine($"Tracked Dealer Button Disabled: {IsTrackDealerButtonDisabled}");
         sb.AppendLine($"History Count: {GetCurrentHistory().Count}");
+        sb.AppendLine($"Dealer Turn Logs Enabled: {GetDealerTurnLogsEnabled()}");
+        sb.AppendLine($"Dealer Turn Log Rows: {GetDealerTurnLogEntries().Count}");
+        sb.AppendLine($"Pending Trade Player: {dealerTurnLogPendingTradePlayer}");
         return sb.ToString();
     }
 
@@ -1331,7 +1738,7 @@ public class MainWindow : Window, IDisposable
     private string GetHistoryExportDirectory()
     {
         string configured = Plugin.Configuration.HistoryExportDirectory?.Trim() ?? string.Empty;
-        if (!string.IsNullOrWhiteSpace(configured) && Directory.Exists(configured))
+        if (!string.IsNullOrWhiteSpace(configured))
             return configured;
 
         return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
@@ -1340,7 +1747,7 @@ public class MainWindow : Window, IDisposable
     private void DrawHistoryExportDirectoryPopup(Vector2 buttonMin)
     {
         const string popupId = "##HistoryExportDirectoryPopupInline";
-        const float popupWidth = 520f;
+        const float popupWidth = 560f;
 
         ImGui.SetNextWindowPos(new Vector2(buttonMin.X - popupWidth - 6f, buttonMin.Y), ImGuiCond.Appearing);
         ImGui.SetNextWindowSize(new Vector2(popupWidth, 0f), ImGuiCond.Appearing);
@@ -1353,14 +1760,25 @@ public class MainWindow : Window, IDisposable
             if (string.IsNullOrWhiteSpace(historyExportDirectoryInput))
                 historyExportDirectoryInput = Plugin.Configuration.HistoryExportDirectory ?? string.Empty;
 
-            ImGui.SetNextItemWidth(popupWidth - 32f);
+            const float browseButtonWidth = 30f;
+            float buttonHeight = ImGui.GetTextLineHeight() + 4f;
+            float fieldWidth = MathF.Max(180f, popupWidth - browseButtonWidth - ImGui.GetStyle().ItemSpacing.X - 36f);
+
+            if (DrawFolderBrowseIconButton("HistoryExportDirectoryPopupBrowseButton", new Vector2(browseButtonWidth, buttonHeight), Hex("#9784e8")))
+                RequestOpenDealerTurnLogDirectoryBrowser();
+
+            if (ImGui.IsItemHovered())
+                ImGui.SetTooltip("Browse folders");
+
+            ImGui.SameLine();
+            ImGui.SetNextItemWidth(fieldWidth);
             if (ImGui.InputText("##HistoryExportDirectoryInput", ref historyExportDirectoryInput, 512))
             {
                 Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
                 Plugin.Configuration.Save();
             }
 
-            if (ImGui.Button("Use Desktop"))
+            if (DrawStyledBoldButton("Desktop", "HistoryExportPopupDesktopButton", new Vector2(84f, 0f), UtilityButtonColor, WhiteText))
             {
                 historyExportDirectoryInput = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
                 Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
@@ -1368,7 +1786,7 @@ public class MainWindow : Window, IDisposable
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("Use Documents"))
+            if (DrawStyledBoldButton("Documents", "HistoryExportPopupDocumentsButton", new Vector2(94f, 0f), UtilityButtonColor, WhiteText))
             {
                 historyExportDirectoryInput = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
                 Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
@@ -1376,7 +1794,7 @@ public class MainWindow : Window, IDisposable
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("Use Backup Folder"))
+            if (DrawStyledBoldButton("Backup Folder", "HistoryExportPopupBackupButton", new Vector2(108f, 0f), UtilityButtonColor, WhiteText))
             {
                 historyExportDirectoryInput = Plugin.Configuration.DealerBackupDirectory ?? string.Empty;
                 Plugin.Configuration.HistoryExportDirectory = historyExportDirectoryInput;
@@ -1384,7 +1802,7 @@ public class MainWindow : Window, IDisposable
             }
 
             ImGui.SameLine();
-            if (ImGui.Button("Clear"))
+            if (DrawStyledBoldButton("Clear", "HistoryExportPopupClearButton", new Vector2(70f, 0f), DangerButtonColor, WhiteText))
             {
                 historyExportDirectoryInput = string.Empty;
                 Plugin.Configuration.HistoryExportDirectory = string.Empty;
@@ -1449,13 +1867,15 @@ public class MainWindow : Window, IDisposable
         ImGui.SameLine();
         AlignTopRightControls(32f + 84f + 84f + (ImGui.GetStyle().ItemSpacing.X * 3f));
 
-        if (DrawExportDirectoryIconButton("HistoryExportDirectoryButton", new Vector2(32f, ImGui.GetTextLineHeight() + 2f), UtilityButtonColor))
+        if (DrawFolderBrowseIconButton("HistoryExportDirectoryButton", new Vector2(30f, ImGui.GetTextLineHeight() + 4f), Hex("#9784e8")))
         {
             historyExportDirectoryInput = Plugin.Configuration.HistoryExportDirectory ?? string.Empty;
             ImGui.OpenPopup("##HistoryExportDirectoryPopupInline");
         }
+
         Vector2 historyExportButtonMin = ImGui.GetItemRectMin();
-        DrawHistoryExportDirectoryPopup(historyExportButtonMin);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Choose export directory");
 
         ImGui.SameLine();
         if (DrawStyledBoldButton("Export TXT", IsPlayerMode ? "PlayerExportTxtButton" : "DealerExportTxtButton", new Vector2(84f, ImGui.GetTextLineHeight() + 2f), Hex("#DA9E00"), WhiteText))
@@ -1470,6 +1890,8 @@ public class MainWindow : Window, IDisposable
             AddDebugLog("UI", $"Export CSV button clicked in {(IsPlayerMode ? "Player" : "Dealer")} mode.");
             ExportCurrentHistory(true);
         }
+
+        DrawHistoryExportDirectoryPopup(historyExportButtonMin);
 
         ImGui.Spacing();
 
@@ -1524,8 +1946,16 @@ public class MainWindow : Window, IDisposable
             Plugin.Configuration.Save();
         }
 
-        ImGui.SameLine();
-        DrawProfitsLossesSummary();
+        if (IsDealerMode)
+        {
+            ImGui.SameLine();
+            DrawProfitsLossesSummary();
+        }
+        else
+        {
+            ImGui.Spacing();
+            DrawProfitsLossesSummary();
+        }
 
         if (DateTime.UtcNow < dealerExportStatusUntilUtc && !string.IsNullOrWhiteSpace(dealerExportStatusText))
         {
@@ -1630,6 +2060,7 @@ public class MainWindow : Window, IDisposable
             {
                 bool isBlackjackResult = entry.Result.Contains("Blackjack", StringComparison.OrdinalIgnoreCase);
                 bool isDoubleDownResult = entry.Result.Contains("Double-Down", StringComparison.OrdinalIgnoreCase);
+                bool isBankingResult = entry.Result.Contains("Banking", StringComparison.OrdinalIgnoreCase);
                 var resultColor = isBlackjackResult
                     ? BlackjackColor
                     : ParseSignedFormatted(entry.Result) < BigInteger.Zero ? LossColor : ProfitColor;
@@ -1638,6 +2069,8 @@ public class MainWindow : Window, IDisposable
                     DrawDoubleDownColoredCell(entry.Result);
                 else if (isBlackjackResult)
                     DrawBoldColoredCell(entry.Result, resultColor);
+                else if (isBankingResult)
+                    DrawBankingResultCell(entry.Result);
                 else
                     DrawColoredCell(entry.Result, resultColor);
             }
@@ -2049,11 +2482,53 @@ public class MainWindow : Window, IDisposable
     }
 
 
-    private void DrawColoredCell(string text, Vector4 color)
+    private void DrawColoredCell(string? text, Vector4 color)
     {
         ImGui.PushStyleColor(ImGuiCol.Text, color);
-        ImGui.TextUnformatted(text);
+        ImGui.TextUnformatted(text ?? string.Empty);
         ImGui.PopStyleColor();
+    }
+
+    private float GetDealerTurnLogRowVerticalOffset()
+    {
+        return MathF.Max(0f, ((ImGui.GetFrameHeight() - ImGui.GetTextLineHeight()) * 0.5f) + 2.5f);
+    }
+
+    private void DrawCenteredColoredCell(string text, Vector4 color)
+    {
+        float verticalOffset = GetDealerTurnLogRowVerticalOffset();
+        if (verticalOffset > 0f)
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + verticalOffset);
+
+        Vector2 textSize = ImGui.CalcTextSize(text ?? string.Empty);
+        float centeredOffset = MathF.Max(0f, ((ImGui.GetColumnWidth() - textSize.X) * 0.5f) - ImGui.GetStyle().CellPadding.X);
+        if (centeredOffset > 0f)
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + centeredOffset);
+
+        DrawColoredCell(text, color);
+    }
+
+    private void DrawLeftAlignedVerticallyCenteredColoredCell(string text, Vector4 color)
+    {
+        float verticalOffset = GetDealerTurnLogRowVerticalOffset();
+        if (verticalOffset > 0f)
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + verticalOffset);
+
+        DrawColoredCell(text, color);
+    }
+
+    private void DrawCenteredHeaderCell(string text)
+    {
+        float verticalOffset = MathF.Max(0f, ((ImGui.GetFrameHeight() - ImGui.GetTextLineHeight()) * 0.5f) + 1f);
+        if (verticalOffset > 0f)
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + verticalOffset);
+
+        Vector2 textSize = ImGui.CalcTextSize(text ?? string.Empty);
+        float centeredOffset = MathF.Max(0f, ((ImGui.GetColumnWidth() - textSize.X) * 0.5f) - ImGui.GetStyle().CellPadding.X);
+        if (centeredOffset > 0f)
+            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + centeredOffset);
+
+        ImGui.TextUnformatted(text);
     }
 
     private void DrawBoldColoredCell(string text, Vector4 color)
@@ -2094,6 +2569,31 @@ public class MainWindow : Window, IDisposable
         ImGui.PushStyleColor(ImGuiCol.Text, DoubleDownTextColor);
         ImGui.TextUnformatted(suffixText);
         ImGui.PopStyleColor();
+    }
+
+
+    private void DrawBankingResultCell(string text)
+    {
+        const string suffix = "Banking";
+        int suffixIndex = text.IndexOf(suffix, StringComparison.OrdinalIgnoreCase);
+
+        if (suffixIndex < 0)
+        {
+            DrawColoredCell(text, ParseSignedFormatted(text) < BigInteger.Zero ? LossColor : ProfitColor);
+            return;
+        }
+
+        string prefix = text[..suffixIndex].TrimEnd();
+        string suffixText = text[suffixIndex..];
+        Vector4 prefixColor = prefix.StartsWith("-", StringComparison.Ordinal) ? LossColor : ProfitColor;
+
+        ImGui.PushStyleColor(ImGuiCol.Text, prefixColor);
+        ImGui.TextUnformatted(prefix);
+        ImGui.PopStyleColor();
+
+        ImGui.SameLine(0f, 4f);
+
+        DrawBoldColoredText(suffixText, ProfitColor);
     }
 
     private void DrawProfitsLossesSummary()
@@ -2280,6 +2780,55 @@ public class MainWindow : Window, IDisposable
             new Vector2(center.X + 4f, arrowTopY + 4f),
             iconColor,
             2.3f);
+
+        ImGui.PopStyleColor(4);
+        return pressed;
+    }
+
+
+    private bool DrawFolderBrowseIconButton(string id, Vector2 size, Vector4 baseColor)
+    {
+        Vector2 actualSize = size;
+        if (actualSize.X <= 0f)
+            actualSize.X = 30f;
+        if (actualSize.Y <= 0f)
+            actualSize.Y = ImGui.GetFrameHeight();
+
+        Vector4 hoverColor = Lighten(baseColor, 0.18f);
+        Vector4 activeColor = Lighten(baseColor, 0.08f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, baseColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hoverColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, activeColor);
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 0f));
+
+        bool pressed = ImGui.Button($"##{id}", actualSize);
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        var drawList = ImGui.GetWindowDrawList();
+        uint iconColor = ImGui.ColorConvertFloat4ToU32(WhiteText);
+        uint accentColor = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, 0.22f));
+
+        float width = max.X - min.X;
+        float height = max.Y - min.Y;
+        float iconWidth = width * 0.58f;
+        float iconHeight = height * 0.50f;
+        float left = min.X + ((width - iconWidth) * 0.5f);
+        float top = min.Y + ((height - iconHeight) * 0.5f) + 1f;
+        float right = left + iconWidth;
+        float bottom = top + iconHeight;
+
+        float tabWidth = iconWidth * 0.38f;
+        float tabHeight = iconHeight * 0.26f;
+        float tabLeft = left + (iconWidth * 0.06f);
+        float tabTop = top - (tabHeight * 0.58f);
+        float tabRight = tabLeft + tabWidth;
+        float tabBottom = top + (iconHeight * 0.14f);
+
+        drawList.AddRectFilled(new Vector2(tabLeft, tabTop), new Vector2(tabRight, tabBottom), iconColor, 2.5f);
+        drawList.AddRectFilled(new Vector2(left, top), new Vector2(right, bottom), iconColor, 3f);
+        drawList.AddRectFilled(new Vector2(left + 2f, top + 2f), new Vector2(right - 2f, top + (iconHeight * 0.46f)), accentColor, 2f);
 
         ImGui.PopStyleColor(4);
         return pressed;
@@ -2869,6 +3418,9 @@ public class MainWindow : Window, IDisposable
 
         lastPlayerBankChangeValue = finalBankValue - previousCurrentBank;
         finalBankInput = FormatNumber(finalBankValue);
+
+        AddTrackedHistoryEntry(FormatSignedResult(lastPlayerBankChangeValue));
+
         SaveCurrentProfileValues();
     }
 
@@ -2910,15 +3462,17 @@ public class MainWindow : Window, IDisposable
     private void AddBankingHistoryEntry(BigInteger amount)
     {
         var history = GetCurrentHistory();
+        string resultText = $"{FormatSignedResult(amount)} Banking";
 
+        AddDebugLog("HISTORY", $"Adding banking history entry: {resultText}.");
         history.Add(new HistoryEntry
         {
             House = houseInput.Trim(),
             Timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture),
             StartingBank = FormatNumber(startingBankValue),
-            FinalBank = FormatSignedResult(amount),
+            FinalBank = FormatNumber(finalBankValue),
             Tips = string.Empty,
-            Result = "+Banking"
+            Result = resultText
         });
 
         if (history.Count > 200)
@@ -2951,6 +3505,11 @@ public class MainWindow : Window, IDisposable
     {
         try
         {
+            string senderRaw = sender.TextValue ?? string.Empty;
+            string messageText = message.TextValue?.Replace('\n', ' ').Replace('\r', ' ').Trim() ?? string.Empty;
+
+            TryCaptureDealerTurnLogChatMessage(type, senderRaw, messageText);
+
             if (!IsPartyChatMonitoringActive)
                 return;
 
@@ -2971,7 +3530,6 @@ public class MainWindow : Window, IDisposable
                 return;
             }
 
-            string senderRaw = sender.TextValue ?? string.Empty;
             string senderName = NormalizeLooseText(StripWorldSuffix(senderRaw));
             string localPlayerName = NormalizeLooseText(Plugin.PlayerState.CharacterName ?? string.Empty);
             if (string.IsNullOrWhiteSpace(localPlayerName))
@@ -2980,7 +3538,6 @@ public class MainWindow : Window, IDisposable
                 return;
             }
 
-            string messageText = message.TextValue?.Replace('\n', ' ').Replace('\r', ' ').Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(messageText))
                 return;
 
@@ -3127,6 +3684,2495 @@ public class MainWindow : Window, IDisposable
             trackerBlackjacksState = TrackerIndicatorState.Error;
             trackerDoubleDownsState = TrackerIndicatorState.Error;
         }
+    }
+
+    private void OnFrameworkUpdate(IFramework framework)
+    {
+        try
+        {
+            if (!GetDealerTurnLogsEnabled() || !IsDealerMode)
+            {
+                FlushPendingDealerTurnLogWrites(force: false);
+                FlushPendingDealerTurnLogConfigurationSave(force: false);
+                return;
+            }
+
+            FlushPendingDealerTurnLogWrites(force: false);
+            FlushPendingDealerTurnLogConfigurationSave(force: false);
+
+            if (DateTime.UtcNow < nextDealerTurnLogPartySyncUtc)
+                return;
+
+            nextDealerTurnLogPartySyncUtc = DateTime.UtcNow.AddMilliseconds(900);
+            SyncDealerTurnLogPartyRoster();
+        }
+        catch (Exception ex)
+        {
+            AddDebugLog("ERR", $"Dealer turn log framework update failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private bool GetDealerTurnLogsEnabled()
+    {
+        var profile = Plugin.Configuration.GetOrCreateActiveProfile();
+        profile.EnsureInitialized();
+        return profile.DealerTurnLogsEnabled;
+    }
+
+    private List<DealerTurnLogEntry> GetDealerTurnLogEntries()
+    {
+        var profile = Plugin.Configuration.GetOrCreateActiveProfile();
+        profile.EnsureInitialized();
+        profile.DealerTurnLogEntries ??= new();
+        foreach (var entry in profile.DealerTurnLogEntries)
+            entry.EnsureInitialized();
+        return profile.DealerTurnLogEntries;
+    }
+
+    private string GetCurrentDealerTurnLogHouse()
+    {
+        return (houseInput ?? string.Empty).Trim();
+    }
+
+    private void ApplyDealerTurnLogHouseIfMissing(DealerTurnLogEntry entry)
+    {
+        if (entry == null)
+            return;
+
+        entry.EnsureInitialized();
+        if (entry.HouseEditedManually)
+            return;
+
+        string currentHouse = GetCurrentDealerTurnLogHouse();
+        if (!string.IsNullOrWhiteSpace(currentHouse) && string.IsNullOrWhiteSpace(entry.House))
+            entry.House = currentHouse;
+    }
+
+    private void SyncDealerTurnLogHouseForActiveRows()
+    {
+        string currentHouse = GetCurrentDealerTurnLogHouse();
+        bool changed = false;
+
+        foreach (var entry in GetDealerTurnLogEntries())
+        {
+            entry.EnsureInitialized();
+            if (!string.IsNullOrWhiteSpace(entry.LeftTimestamp))
+                continue;
+            if (entry.HouseEditedManually)
+                continue;
+
+            string existingHouse = (entry.House ?? string.Empty).Trim();
+            if (!string.Equals(existingHouse, currentHouse, StringComparison.Ordinal))
+            {
+                entry.House = currentHouse;
+                changed = true;
+            }
+        }
+
+        if (changed)
+            MarkDealerTurnLogConfigurationDirty();
+    }
+
+    private string GetDealerTurnLogDisplayHouse(DealerTurnLogEntry entry)
+    {
+        if (entry == null)
+            return string.Empty;
+
+        entry.EnsureInitialized();
+        return (entry.House ?? string.Empty).Trim();
+    }
+
+
+    private void ToggleDealerTurnLogs()
+    {
+        var profile = Plugin.Configuration.GetOrCreateActiveProfile();
+        profile.EnsureInitialized();
+
+        if (!profile.DealerTurnLogsEnabled && GetDealerPartyPlayerCount() <= 0)
+        {
+            dealerTurnLogsRequirePartyMessageUntilUtc = DateTime.UtcNow.AddSeconds(3);
+            AddDebugLog("TURNLOG", "Blocked dealer turn logs enable because the local player is not currently in a party.");
+            return;
+        }
+
+        profile.DealerTurnLogsEnabled = !profile.DealerTurnLogsEnabled;
+        Plugin.Configuration.Save();
+
+        if (profile.DealerTurnLogsEnabled)
+        {
+            dealerTurnLogsRequirePartyMessageUntilUtc = DateTime.MinValue;
+            AddDebugLog("TURNLOG", "Dealer turn logs enabled.");
+            SyncDealerTurnLogPartyRoster(forceJoinStamp: true);
+        }
+        else
+        {
+            AddDebugLog("TURNLOG", "Dealer turn logs disabled.");
+            ClearDealerTurnLogPendingTrade();
+        }
+    }
+
+    private void SyncDealerTurnLogPartyRoster(bool forceJoinStamp = false)
+    {
+        if (!GetDealerTurnLogsEnabled() || !IsDealerMode)
+            return;
+
+        var entries = GetDealerTurnLogEntries();
+        var presentNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string nowText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        DateTime nowUtc = DateTime.UtcNow;
+        bool changed = false;
+
+        string localPlayerName = StripWorldSuffix(Plugin.PlayerState.CharacterName ?? string.Empty);
+        int currentPartyMemberCount = 0;
+
+        for (int i = 0; i < Plugin.PartyList.Length; i++)
+        {
+            var member = Plugin.PartyList[i];
+            if (member == null)
+                continue;
+
+            string memberName = StripWorldSuffix(member.Name.TextValue ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(memberName))
+            {
+                presentNames.Add(memberName);
+                currentPartyMemberCount++;
+            }
+        }
+
+        bool partyIsCurrentlyActive = currentPartyMemberCount > 0;
+        dealerTurnLogPartyPreviouslyActive = partyIsCurrentlyActive;
+
+        foreach (string presentName in presentNames)
+        {
+            dealerTurnLogLastSeenUtc[presentName] = nowUtc;
+
+            bool isLocalPlayer = !string.IsNullOrWhiteSpace(localPlayerName) &&
+                string.Equals(presentName, localPlayerName, StringComparison.OrdinalIgnoreCase);
+
+            if (isLocalPlayer)
+                continue;
+
+            var entry = FindDealerTurnLogEntry(presentName);
+            if (entry == null)
+            {
+                entry = new DealerTurnLogEntry
+                {
+                    PlayerName = presentName,
+                    JoinedTimestamp = nowText,
+                    House = GetCurrentDealerTurnLogHouse(),
+                };
+                entry.EnsureInitialized();
+                entries.Add(entry);
+                changed = true;
+                AddDebugLog("TURNLOG", $"Player registered in logs: {presentName} | Joined={nowText}");
+                continue;
+            }
+
+            entry.EnsureInitialized();
+            ApplyDealerTurnLogHouseIfMissing(entry);
+            bool rowChanged = false;
+            if (string.IsNullOrWhiteSpace(entry.JoinedTimestamp) || (forceJoinStamp && !string.IsNullOrWhiteSpace(entry.LeftTimestamp)))
+            {
+                entry.JoinedTimestamp = nowText;
+                changed = true;
+                rowChanged = true;
+            }
+
+            if (!string.IsNullOrWhiteSpace(entry.LeftTimestamp))
+            {
+                entry.LeftTimestamp = string.Empty;
+                changed = true;
+                rowChanged = true;
+                AddDebugLog("TURNLOG", $"Player rejoined tracked party: {presentName}");
+            }
+
+            if (rowChanged)
+                MarkDealerTurnLogFilesDirty(entry, writeChatFile: true, writeTradeFile: false);
+        }
+
+        foreach (var entry in entries)
+        {
+            entry.EnsureInitialized();
+            string playerName = StripWorldSuffix(entry.PlayerName ?? string.Empty);
+            if (string.IsNullOrWhiteSpace(playerName))
+                continue;
+            if (presentNames.Contains(playerName))
+                continue;
+            if (!string.IsNullOrWhiteSpace(entry.LeftTimestamp))
+                continue;
+
+            bool isLocalPlayer = !string.IsNullOrWhiteSpace(localPlayerName) &&
+                string.Equals(playerName, localPlayerName, StringComparison.OrdinalIgnoreCase);
+
+            if (isLocalPlayer)
+                continue;
+
+            if (!dealerTurnLogLastSeenUtc.TryGetValue(playerName, out var lastSeenUtc))
+                lastSeenUtc = nowUtc;
+
+            if ((nowUtc - lastSeenUtc) < TimeSpan.FromSeconds(3))
+                continue;
+
+            entry.LeftTimestamp = nowText;
+            changed = true;
+            MarkDealerTurnLogFilesDirty(entry, writeChatFile: true, writeTradeFile: false);
+            AddDebugLog("TURNLOG", $"Player marked as left: {playerName} | Left={nowText}");
+        }
+
+        if (changed)
+            MarkDealerTurnLogConfigurationDirty();
+    }
+
+    private DealerTurnLogEntry? FindDealerTurnLogEntry(string playerName)
+    {
+        if (string.IsNullOrWhiteSpace(playerName))
+            return null;
+
+        string normalized = NormalizeLooseText(playerName);
+        foreach (var entry in GetDealerTurnLogEntries())
+        {
+            if (NamesRoughlyMatch(NormalizeLooseText(entry.PlayerName ?? string.Empty), normalized))
+                return entry;
+        }
+
+        return null;
+    }
+
+    private DealerTurnLogEntry GetOrCreateDealerTurnLogEntry(string playerName)
+    {
+        string cleanName = ResolveDealerTurnLogPlayerName(playerName);
+        var existing = FindDealerTurnLogEntry(cleanName);
+        if (existing != null)
+        {
+            existing.EnsureInitialized();
+            ApplyDealerTurnLogHouseIfMissing(existing);
+            if (string.IsNullOrWhiteSpace(existing.PlayerName))
+                existing.PlayerName = cleanName;
+            return existing;
+        }
+
+        string nowText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var entry = new DealerTurnLogEntry
+        {
+            PlayerName = cleanName,
+            JoinedTimestamp = nowText,
+            House = GetCurrentDealerTurnLogHouse(),
+        };
+        entry.EnsureInitialized();
+        GetDealerTurnLogEntries().Add(entry);
+        dealerTurnLogLastSeenUtc[cleanName] = DateTime.UtcNow;
+        MarkDealerTurnLogConfigurationDirty();
+        AddDebugLog("TURNLOG", $"Created missing turn log row for player '{cleanName}'.");
+        MarkDealerTurnLogFilesDirty(entry);
+        return entry;
+    }
+
+    private string GetDealerTurnLogShiftActionPrefix()
+    {
+        return "[SHIFT_ACTION] ";
+    }
+
+    private bool IsDealerTurnLogShiftActionLine(string line)
+    {
+        return !string.IsNullOrWhiteSpace(line) && line.StartsWith(GetDealerTurnLogShiftActionPrefix(), StringComparison.Ordinal);
+    }
+
+    private DealerTurnLogEntry? FindActiveLocalDealerTurnLogEntry()
+    {
+        string localPlayerName = StripWorldSuffix(Plugin.PlayerState.CharacterName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(localPlayerName))
+            return null;
+
+        return GetDealerTurnLogEntries()
+            .Where(entry => entry != null)
+            .Select(entry => { entry.EnsureInitialized(); return entry; })
+            .Where(entry => string.IsNullOrWhiteSpace(entry.LeftTimestamp))
+            .Where(entry => NamesRoughlyMatch(NormalizeLooseText(entry.PlayerName ?? string.Empty), NormalizeLooseText(localPlayerName)))
+            .OrderByDescending(entry => ParseTimestamp(entry.JoinedTimestamp))
+            .FirstOrDefault();
+    }
+
+    private void AppendDealerTurnLogShiftAction(string checkpointName)
+    {
+        if (!GetDealerTurnLogsEnabled() || !IsDealerMode)
+            return;
+
+        string localPlayerName = StripWorldSuffix(Plugin.PlayerState.CharacterName ?? string.Empty);
+        if (string.IsNullOrWhiteSpace(localPlayerName))
+            return;
+
+        string timestampText = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        string actionText = checkpointName switch
+        {
+            "Start Shift" => "Started shift.",
+            "Break" => "Taking a break.",
+            "Resume" => "End of the break.",
+            "End Shift" => "Shift Ended.",
+            _ => string.Empty
+        };
+
+        if (string.IsNullOrWhiteSpace(actionText))
+            return;
+
+        DealerTurnLogEntry? entry = FindActiveLocalDealerTurnLogEntry();
+        if (string.Equals(checkpointName, "Start Shift", StringComparison.OrdinalIgnoreCase))
+        {
+            if (entry == null)
+            {
+                entry = new DealerTurnLogEntry
+                {
+                    PlayerName = localPlayerName,
+                    JoinedTimestamp = timestampText,
+                    House = GetCurrentDealerTurnLogHouse(),
+                };
+                entry.EnsureInitialized();
+                GetDealerTurnLogEntries().Add(entry);
+                AddDebugLog("TURNLOG", $"Local player registered in logs from Start Shift: {localPlayerName} | Joined={timestampText}");
+            }
+            else
+            {
+                ApplyDealerTurnLogHouseIfMissing(entry);
+            }
+
+            entry.JoinedTimestamp = timestampText;
+            entry.LeftTimestamp = string.Empty;
+        }
+
+        if (entry == null)
+            return;
+
+        entry.EnsureInitialized();
+        ApplyDealerTurnLogHouseIfMissing(entry);
+
+        if (string.Equals(checkpointName, "End Shift", StringComparison.OrdinalIgnoreCase))
+        {
+            DateTime shiftStartTimestamp = ParseTimestamp(entry.JoinedTimestamp);
+            DateTime shiftEndTimestamp = ParseTimestamp(timestampText);
+
+            if (shiftStartTimestamp == DateTime.MinValue)
+                shiftStartTimestamp = TryGetMostRecentDealerShiftStartBefore(shiftEndTimestamp) ?? DateTime.MinValue;
+
+            if (shiftStartTimestamp != DateTime.MinValue && shiftEndTimestamp != DateTime.MinValue && shiftEndTimestamp >= shiftStartTimestamp)
+                actionText += $" Total time: {FormatShiftDurationDetailed(shiftEndTimestamp - shiftStartTimestamp)}";
+        }
+
+        string shiftLine = $"{GetDealerTurnLogShiftActionPrefix()}[{timestampText}] {entry.PlayerName}: {actionText}";
+        entry.ChatLines.Add(shiftLine);
+
+        if (string.Equals(checkpointName, "End Shift", StringComparison.OrdinalIgnoreCase))
+            entry.LeftTimestamp = timestampText;
+
+        dealerTurnLogLastSeenUtc[entry.PlayerName] = DateTime.UtcNow;
+        MarkDealerTurnLogFilesDirty(entry, writeChatFile: true, writeTradeFile: false);
+        MarkDealerTurnLogConfigurationDirty();
+    }
+
+    private void TryCaptureDealerTurnLogChatMessage(XivChatType type, string senderRaw, string messageText)
+    {
+        if (!GetDealerTurnLogsEnabled() || !IsDealerMode)
+            return;
+
+        if (!string.IsNullOrWhiteSpace(messageText))
+            TryCaptureDealerTurnTradeMessage(type, senderRaw, messageText);
+
+        if (type != XivChatType.Party)
+            return;
+
+        string senderName = ResolveDealerTurnLogPlayerName(senderRaw);
+        if (string.IsNullOrWhiteSpace(senderName) || string.IsNullOrWhiteSpace(messageText))
+            return;
+
+        string localPlayerName = StripWorldSuffix(Plugin.PlayerState.CharacterName ?? string.Empty);
+        DealerTurnLogEntry? entry = !string.IsNullOrWhiteSpace(localPlayerName) &&
+            NamesRoughlyMatch(NormalizeLooseText(senderName), NormalizeLooseText(localPlayerName))
+            ? FindActiveLocalDealerTurnLogEntry()
+            : null;
+
+        if (entry == null)
+        {
+            if (!string.IsNullOrWhiteSpace(localPlayerName) &&
+                NamesRoughlyMatch(NormalizeLooseText(senderName), NormalizeLooseText(localPlayerName)))
+                return;
+
+            entry = GetOrCreateDealerTurnLogEntry(senderName);
+        }
+        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {entry.PlayerName}: {messageText}";
+        entry.ChatLines.Add(line);
+        dealerTurnLogLastSeenUtc[entry.PlayerName] = DateTime.UtcNow;
+        MarkDealerTurnLogFilesDirty(entry, writeChatFile: true, writeTradeFile: false);
+        MarkDealerTurnLogConfigurationDirty();
+    }
+
+    private void TryCaptureDealerTurnTradeMessage(XivChatType type, string senderRaw, string messageText)
+    {
+        if (string.IsNullOrWhiteSpace(messageText))
+            return;
+
+        string tradeText = SanitizeTradeSystemMessage(messageText);
+        if (string.IsNullOrWhiteSpace(tradeText))
+            return;
+
+        if (DateTime.UtcNow >= dealerTurnLogPendingTradeUntilUtc)
+            ClearDealerTurnLogPendingTrade();
+
+        var inboundRequestMatch = TradeRequestFromPlayerRegex.Match(tradeText);
+        if (inboundRequestMatch.Success)
+        {
+            dealerTurnLogPendingTradePlayer = ResolveDealerTurnLogPlayerName(inboundRequestMatch.Groups["name"].Value);
+            dealerTurnLogPendingTradeInitiatedByLocal = false;
+            dealerTurnLogPendingTradeUntilUtc = DateTime.UtcNow.AddMinutes(2);
+            GetOrCreateDealerTurnLogEntry(dealerTurnLogPendingTradePlayer);
+            AddDebugLog("TURNLOG", $"Pending inbound trade detected from '{dealerTurnLogPendingTradePlayer}'.");
+            return;
+        }
+
+        var outboundRequestMatch = TradeRequestFromLocalRegex.Match(tradeText);
+        if (outboundRequestMatch.Success)
+        {
+            dealerTurnLogPendingTradePlayer = ResolveDealerTurnLogPlayerName(outboundRequestMatch.Groups["name"].Value);
+            dealerTurnLogPendingTradeInitiatedByLocal = true;
+            dealerTurnLogPendingTradeUntilUtc = DateTime.UtcNow.AddMinutes(2);
+            GetOrCreateDealerTurnLogEntry(dealerTurnLogPendingTradePlayer);
+            AddDebugLog("TURNLOG", $"Pending outbound trade detected to '{dealerTurnLogPendingTradePlayer}'.");
+            return;
+        }
+
+        var awaitingConfirmationMatch = TradeAwaitingConfirmationRegex.Match(tradeText);
+        if (awaitingConfirmationMatch.Success)
+        {
+            dealerTurnLogPendingTradePlayer = ResolveDealerTurnLogPlayerName(awaitingConfirmationMatch.Groups["name"].Value);
+            dealerTurnLogPendingTradeUntilUtc = DateTime.UtcNow.AddMinutes(2);
+            GetOrCreateDealerTurnLogEntry(dealerTurnLogPendingTradePlayer);
+            AddDebugLog("TURNLOG", $"Trade confirmation pending with '{dealerTurnLogPendingTradePlayer}'.");
+            return;
+        }
+
+        if (TradeCancelRegex.IsMatch(tradeText))
+        {
+            AddDebugLog("TURNLOG", "Pending trade state cleared after cancel/decline message.");
+            ClearDealerTurnLogPendingTrade();
+            return;
+        }
+
+        if (tradeText.IndexOf("trade", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            tradeText.IndexOf(" gil", StringComparison.OrdinalIgnoreCase) >= 0)
+        {
+            AddDebugLog("TURNLOG", $"Inspecting possible trade message | Type='{type}' | Sender='{senderRaw}' | Text='{tradeText}'");
+        }
+
+        if (TryAppendDealerTurnTradeFromMatch(TradeSentNamedRegex.Match(tradeText), sentByPlayer: false, usePendingNameIfMissing: false))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeReceivedNamedRegex.Match(tradeText), sentByPlayer: true, usePendingNameIfMissing: false))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeReceivedPassiveRegex.Match(tradeText), sentByPlayer: false, usePendingNameIfMissing: false))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeOfferLocalNamedRegex.Match(tradeText), sentByPlayer: false, usePendingNameIfMissing: true))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeOfferPlayerNamedRegex.Match(tradeText), sentByPlayer: true, usePendingNameIfMissing: true))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeGiveLocalNamedRegex.Match(tradeText), sentByPlayer: false, usePendingNameIfMissing: false))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeGivePlayerNamedRegex.Match(tradeText), sentByPlayer: true, usePendingNameIfMissing: false))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeSentPendingRegex.Match(tradeText), sentByPlayer: false, usePendingNameIfMissing: true))
+            return;
+        if (TryAppendDealerTurnTradeFromMatch(TradeReceivedPendingRegex.Match(tradeText), sentByPlayer: true, usePendingNameIfMissing: true))
+            return;
+        if (TryAppendDealerTurnTradeByPhrase(tradeText))
+            return;
+    }
+
+    private bool TryAppendDealerTurnTradeFromMatch(Match match, bool sentByPlayer, bool usePendingNameIfMissing)
+    {
+        if (!match.Success)
+            return false;
+
+        string playerName = ResolveDealerTurnLogPlayerName(match.Groups["name"].Success ? match.Groups["name"].Value : string.Empty);
+        if (string.IsNullOrWhiteSpace(playerName) && usePendingNameIfMissing)
+            playerName = ResolveDealerTurnLogPlayerName(dealerTurnLogPendingTradePlayer);
+
+        if (string.IsNullOrWhiteSpace(playerName))
+            return false;
+
+        BigInteger amount = ParseBankValue(match.Groups["amount"].Success ? match.Groups["amount"].Value : string.Empty);
+        if (amount <= BigInteger.Zero)
+            return false;
+
+        AppendDealerTurnTrade(playerName, sentByPlayer, amount);
+        return true;
+    }
+
+    private void AppendDealerTurnTrade(string playerName, bool sentByPlayer, BigInteger amount)
+    {
+        var entry = GetOrCreateDealerTurnLogEntry(playerName);
+        string directionText = sentByPlayer ? "Sent" : "Received";
+        string formattedAmount = FormatNumber(amount);
+
+        ApplyTradeToDealerTurnLogEntry(entry, sentByPlayer, amount, formattedAmount);
+
+        string localPlayerName = StripWorldSuffix(Plugin.PlayerState.CharacterName ?? string.Empty);
+        DealerTurnLogEntry? localEntry = FindActiveLocalDealerTurnLogEntry();
+        bool shouldMirrorToLocal =
+            localEntry != null &&
+            !string.IsNullOrWhiteSpace(localPlayerName) &&
+            !NamesRoughlyMatch(NormalizeLooseText(entry.PlayerName), NormalizeLooseText(localPlayerName));
+
+        if (shouldMirrorToLocal)
+            ApplyTradeToDealerTurnLogEntry(localEntry!, sentByPlayer, amount, formattedAmount);
+
+        dealerTurnLogPendingTradePlayer = entry.PlayerName;
+        dealerTurnLogPendingTradeInitiatedByLocal = !sentByPlayer;
+        dealerTurnLogPendingTradeUntilUtc = DateTime.UtcNow.AddMinutes(2);
+        MarkDealerTurnLogConfigurationDirty();
+        AddDebugLog("TURNLOG", $"Trade logged | Player='{entry.PlayerName}' | Direction='{directionText}' | Amount={formattedAmount} | ReceivedTotal='{entry.TotalReceivedGil}' | SentTotal='{entry.TotalSentGil}'");
+
+        if (shouldMirrorToLocal && localEntry != null)
+        {
+            AddDebugLog("TURNLOG", $"Trade mirrored to local player | Player='{localEntry.PlayerName}' | Direction='{directionText}' | Amount={formattedAmount} | ReceivedTotal='{localEntry.TotalReceivedGil}' | SentTotal='{localEntry.TotalSentGil}'");
+        }
+    }
+
+    private void ApplyTradeToDealerTurnLogEntry(DealerTurnLogEntry entry, bool sentByPlayer, BigInteger amount, string formattedAmount)
+    {
+        entry.EnsureInitialized();
+        string directionText = sentByPlayer ? "Sent" : "Received";
+        string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {entry.PlayerName} {directionText} {formattedAmount} Gil";
+        entry.TradeLines.Add(line);
+
+        if (sentByPlayer)
+        {
+            BigInteger currentReceived = ParseBankValue(entry.TotalReceivedGil);
+            entry.TotalReceivedGil = FormatNumber(currentReceived + amount);
+        }
+        else
+        {
+            BigInteger currentSent = ParseBankValue(entry.TotalSentGil);
+            entry.TotalSentGil = FormatNumber(currentSent + amount);
+        }
+
+        MarkDealerTurnLogFilesDirty(entry, writeChatFile: false, writeTradeFile: true);
+    }
+
+    private void ClearDealerTurnLogPendingTrade()
+    {
+        dealerTurnLogPendingTradePlayer = string.Empty;
+        dealerTurnLogPendingTradeInitiatedByLocal = false;
+        dealerTurnLogPendingTradeUntilUtc = DateTime.MinValue;
+    }
+
+    private bool TryAppendDealerTurnTradeByPhrase(string tradeText)
+    {
+        BigInteger amount = ParseBankValue(tradeText);
+        if (amount <= BigInteger.Zero)
+            return false;
+
+        string playerName = ResolveDealerTurnLogPlayerName(ExtractTradeCounterpartyName(tradeText));
+        if (string.IsNullOrWhiteSpace(playerName))
+            playerName = ResolveDealerTurnLogPlayerName(dealerTurnLogPendingTradePlayer);
+
+        if (string.IsNullOrWhiteSpace(playerName))
+            return false;
+
+        if (tradeText.StartsWith("You hand over ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You offer ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You offered ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You give ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You gave ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You send ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You sent ", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendDealerTurnTrade(playerName, sentByPlayer: false, amount);
+            return true;
+        }
+
+        if (tradeText.StartsWith("You receive ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You received ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You get ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.StartsWith("You got ", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendDealerTurnTrade(playerName, sentByPlayer: true, amount);
+            return true;
+        }
+
+        if (tradeText.Contains(" gives you ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.Contains(" gave you ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.Contains(" sends you ", StringComparison.OrdinalIgnoreCase) ||
+            tradeText.Contains(" sent you ", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendDealerTurnTrade(playerName, sentByPlayer: true, amount);
+            return true;
+        }
+
+        if (tradeText.Contains(" receives ", StringComparison.OrdinalIgnoreCase) &&
+            tradeText.Contains(" from you", StringComparison.OrdinalIgnoreCase))
+        {
+            AppendDealerTurnTrade(playerName, sentByPlayer: false, amount);
+            return true;
+        }
+
+        return false;
+    }
+
+    private string ExtractTradeCounterpartyName(string tradeText)
+    {
+        if (string.IsNullOrWhiteSpace(tradeText))
+            return string.Empty;
+
+        string[] suffixMarkers =
+        {
+            " wishes to trade with you",
+            " would like to trade with you",
+            " gives you ",
+            " gave you ",
+            " sends you ",
+            " sent you ",
+            " receives ",
+            " received ",
+            " from you"
+        };
+
+        foreach (string marker in suffixMarkers)
+        {
+            int index = tradeText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index > 0)
+                return tradeText[..index].Trim();
+        }
+
+        string[] prefixMarkers =
+        {
+            "Trade request sent to ",
+            "Awaiting trade confirmation from ",
+            "You requested a trade with ",
+            "You request a trade with ",
+            "You receive ",
+            "You received "
+        };
+
+        foreach (string marker in prefixMarkers)
+        {
+            int index = tradeText.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+                continue;
+
+            string tail = tradeText[(index + marker.Length)..].Trim();
+            int gilIndex = tail.IndexOf(" gil", StringComparison.OrdinalIgnoreCase);
+            if (gilIndex > 0)
+                tail = tail[(gilIndex + 4)..].Trim();
+            return tail.Trim('.').Trim();
+        }
+
+        return string.Empty;
+    }
+
+    private string ResolveDealerTurnLogPlayerName(string rawName)
+    {
+        string cleanName = StripWorldSuffix(rawName);
+        if (string.IsNullOrWhiteSpace(cleanName))
+            return string.Empty;
+
+        string normalized = NormalizeLooseText(cleanName);
+        if (string.IsNullOrWhiteSpace(normalized))
+            return cleanName;
+
+        var candidates = new List<string>();
+        string localPlayerName = StripWorldSuffix(Plugin.PlayerState.CharacterName ?? string.Empty);
+        if (!string.IsNullOrWhiteSpace(localPlayerName))
+            candidates.Add(localPlayerName);
+
+        for (int i = 0; i < Plugin.PartyList.Length; i++)
+        {
+            var member = Plugin.PartyList[i];
+            if (member == null)
+                continue;
+
+            string memberName = StripWorldSuffix(member.Name.TextValue ?? string.Empty);
+            if (!string.IsNullOrWhiteSpace(memberName))
+                candidates.Add(memberName);
+        }
+
+        foreach (var entry in GetDealerTurnLogEntries())
+        {
+            if (!string.IsNullOrWhiteSpace(entry.PlayerName))
+                candidates.Add(entry.PlayerName);
+        }
+
+        foreach (string candidate in candidates.Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            string candidateNormalized = NormalizeLooseText(candidate);
+            if (NamesRoughlyMatch(candidateNormalized, normalized))
+                return candidate;
+
+            if (normalized.StartsWith(candidateNormalized, StringComparison.OrdinalIgnoreCase) ||
+                candidateNormalized.StartsWith(normalized, StringComparison.OrdinalIgnoreCase))
+                return candidate;
+        }
+
+        return cleanName;
+    }
+
+    private static string SanitizeTradeSystemMessage(string input)
+    {
+        if (string.IsNullOrWhiteSpace(input))
+            return string.Empty;
+
+        var builder = new StringBuilder(input.Length);
+        foreach (char c in input)
+        {
+            if (char.IsLetterOrDigit(c) || char.IsWhiteSpace(c) || c == '.' || c == ',' || c == ':' || c == ';' || c == '-' || c == '\'' )
+                builder.Append(c);
+        }
+
+        return builder.ToString().Trim();
+    }
+
+    private string GetDealerTurnLogExportDirectory()
+    {
+        string configured = Plugin.Configuration.HistoryExportDirectory?.Trim() ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(configured))
+            return configured;
+
+        return Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+    }
+
+    private string BuildDealerTurnLogFilePath(DealerTurnLogEntry entry, bool exportChat)
+    {
+        string outputDirectory = GetDealerTurnLogExportDirectory();
+        string dateLabel = GetDealerTurnLogFileDateLabel(entry);
+        string safeName = SanitizeFileName(entry.PlayerName);
+        string kind = exportChat ? "Chat logs" : "Trade logs";
+        return Path.Combine(outputDirectory, $"[{dateLabel}] {safeName} {kind}.txt");
+    }
+
+    private string GetDealerTurnLogDeletedStateFilePath()
+    {
+        return Path.Combine(GetDealerTurnLogExportDirectory(), ".gambabank_log_deletions.json");
+    }
+
+    private string GetDealerTurnLogDeletedStateKey(DealerTurnLogEntry entry, bool exportChat)
+    {
+        return BuildDealerTurnLogFilePath(entry, exportChat);
+    }
+
+    private void EnsureDealerTurnLogDeletedStateLoaded()
+    {
+        if (dealerTurnLogDeletedStateLoaded)
+            return;
+
+        dealerTurnLogDeletedStateLoaded = true;
+        dealerTurnLogDeletedState.Clear();
+
+        try
+        {
+            string statePath = GetDealerTurnLogDeletedStateFilePath();
+            if (!File.Exists(statePath))
+                return;
+
+            string json = File.ReadAllText(statePath, Encoding.UTF8);
+            var loaded = JsonSerializer.Deserialize<Dictionary<string, string>>(json);
+            if (loaded == null)
+                return;
+
+            foreach (var pair in loaded)
+            {
+                if (!string.IsNullOrWhiteSpace(pair.Key) && !string.IsNullOrWhiteSpace(pair.Value))
+                    dealerTurnLogDeletedState[pair.Key] = pair.Value;
+            }
+        }
+        catch
+        {
+            dealerTurnLogDeletedState.Clear();
+        }
+    }
+
+    private void SaveDealerTurnLogDeletedState()
+    {
+        try
+        {
+            string outputDirectory = GetDealerTurnLogExportDirectory();
+            if (!Directory.Exists(outputDirectory))
+                Directory.CreateDirectory(outputDirectory);
+
+            string statePath = GetDealerTurnLogDeletedStateFilePath();
+            if (dealerTurnLogDeletedState.Count == 0)
+            {
+                if (File.Exists(statePath))
+                    File.Delete(statePath);
+                return;
+            }
+
+            string json = JsonSerializer.Serialize(dealerTurnLogDeletedState, new JsonSerializerOptions { WriteIndented = true });
+            File.WriteAllText(statePath, json, Encoding.UTF8);
+        }
+        catch
+        {
+        }
+    }
+
+    private string GetDealerTurnLogDeletedTimestamp(DealerTurnLogEntry entry, bool exportChat)
+    {
+        EnsureDealerTurnLogDeletedStateLoaded();
+        string key = GetDealerTurnLogDeletedStateKey(entry, exportChat);
+        return dealerTurnLogDeletedState.TryGetValue(key, out var timestamp) ? timestamp : string.Empty;
+    }
+
+    private string GetDealerTurnLogFileDateLabel(DealerTurnLogEntry entry)
+    {
+        DateTime timestamp = ParseTimestamp(entry.JoinedTimestamp);
+        if (timestamp == DateTime.MinValue)
+            timestamp = DateTime.Now;
+
+        return timestamp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    }
+
+    private string BuildDealerTurnLogFileContent(DealerTurnLogEntry entry, bool exportChat)
+    {
+        entry.EnsureInitialized();
+
+        string displayHouse = GetDealerTurnLogDisplayHouse(entry);
+        string housePrefix = string.IsNullOrWhiteSpace(displayHouse) ? string.Empty : $"[{displayHouse}] ";
+        var sourceLines = exportChat ? entry.ChatLines : entry.TradeLines;
+        var lines = new List<string>(sourceLines.Count + 6);
+        var shiftActionLines = new List<string>();
+
+        foreach (string sourceLine in sourceLines)
+        {
+            if (string.IsNullOrWhiteSpace(sourceLine))
+                continue;
+
+            if (exportChat && IsDealerTurnLogShiftActionLine(sourceLine))
+            {
+                shiftActionLines.Add(sourceLine.Substring(GetDealerTurnLogShiftActionPrefix().Length));
+                continue;
+            }
+
+            lines.Add(string.IsNullOrWhiteSpace(housePrefix) ? sourceLine : housePrefix + sourceLine);
+        }
+
+        if (exportChat && !string.IsNullOrWhiteSpace(entry.LeftTimestamp))
+        {
+            string leftLine = $"[{entry.LeftTimestamp}] {entry.PlayerName} Left the party.";
+            lines.Add(string.IsNullOrWhiteSpace(housePrefix) ? leftLine : housePrefix + leftLine);
+        }
+
+        if (exportChat && shiftActionLines.Count > 0)
+        {
+            if (lines.Count > 0)
+                lines.Add("----------");
+
+            foreach (string shiftLine in shiftActionLines)
+                lines.Add(string.IsNullOrWhiteSpace(housePrefix) ? shiftLine : housePrefix + shiftLine);
+        }
+
+        return string.Join(Environment.NewLine, lines);
+    }
+
+    private void EnsureDealerTurnLogFilesExist(DealerTurnLogEntry entry, bool writeChatFile = true, bool writeTradeFile = true)
+    {
+        entry.EnsureInitialized();
+
+        if (writeChatFile)
+            WriteDealerTurnLogFile(entry, exportChat: true, updateStatus: false);
+
+        if (writeTradeFile)
+            WriteDealerTurnLogFile(entry, exportChat: false, updateStatus: false);
+    }
+
+    private void EnsureAllDealerTurnLogFilesExist()
+    {
+        foreach (var entry in GetDealerTurnLogEntries())
+            EnsureDealerTurnLogFilesExist(entry);
+        FlushPendingDealerTurnLogWrites(force: true);
+        FlushPendingDealerTurnLogConfigurationSave(force: true);
+    }
+
+    private void WriteDealerTurnLogFile(DealerTurnLogEntry entry, bool exportChat, bool updateStatus)
+    {
+        entry.EnsureInitialized();
+        string outputDirectory = GetDealerTurnLogExportDirectory();
+        if (!Directory.Exists(outputDirectory))
+            Directory.CreateDirectory(outputDirectory);
+
+        string filePath = BuildDealerTurnLogFilePath(entry, exportChat);
+        string content = BuildDealerTurnLogFileContent(entry, exportChat);
+
+        File.WriteAllText(filePath, content, Encoding.UTF8);
+        EnsureDealerTurnLogDeletedStateLoaded();
+        string deleteKey = GetDealerTurnLogDeletedStateKey(entry, exportChat);
+        if (dealerTurnLogDeletedState.Remove(deleteKey))
+            SaveDealerTurnLogDeletedState();
+
+        if (exportChat)
+            entry.ChatExportFilePath = filePath;
+        else
+            entry.TradeExportFilePath = filePath;
+
+        if (updateStatus)
+        {
+            dealerTurnLogExportStatusText = "Saved";
+            dealerTurnLogExportStatusPath = outputDirectory;
+            dealerTurnLogExportStatusFailed = false;
+            dealerTurnLogExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+        }
+    }
+
+    private void MarkDealerTurnLogConfigurationDirty(int delayMilliseconds = 800)
+    {
+        dealerTurnLogConfigurationDirty = true;
+        DateTime targetUtc = DateTime.UtcNow.AddMilliseconds(delayMilliseconds);
+        if (nextDealerTurnLogConfigurationSaveUtc == DateTime.MinValue || targetUtc < nextDealerTurnLogConfigurationSaveUtc)
+            nextDealerTurnLogConfigurationSaveUtc = targetUtc;
+    }
+
+    private void FlushPendingDealerTurnLogConfigurationSave(bool force)
+    {
+        if (!dealerTurnLogConfigurationDirty)
+            return;
+        if (!force && DateTime.UtcNow < nextDealerTurnLogConfigurationSaveUtc)
+            return;
+
+        Plugin.Configuration.Save();
+        dealerTurnLogConfigurationDirty = false;
+        nextDealerTurnLogConfigurationSaveUtc = DateTime.MinValue;
+    }
+
+    private void MarkDealerTurnLogFilesDirty(DealerTurnLogEntry entry, bool writeChatFile = true, bool writeTradeFile = true)
+    {
+        entry.EnsureInitialized();
+        string key = GetDealerTurnLogSelectionKey(entry);
+        if (writeChatFile)
+            pendingDealerTurnLogChatFileWrites.Add(key);
+        if (writeTradeFile)
+            pendingDealerTurnLogTradeFileWrites.Add(key);
+
+        DateTime targetUtc = DateTime.UtcNow.AddMilliseconds(500);
+        if (nextDealerTurnLogFileFlushUtc == DateTime.MinValue || targetUtc < nextDealerTurnLogFileFlushUtc)
+            nextDealerTurnLogFileFlushUtc = targetUtc;
+    }
+
+    private void FlushPendingDealerTurnLogWrites(bool force)
+    {
+        if (pendingDealerTurnLogChatFileWrites.Count == 0 && pendingDealerTurnLogTradeFileWrites.Count == 0)
+            return;
+        if (!force && DateTime.UtcNow < nextDealerTurnLogFileFlushUtc)
+            return;
+
+        var entries = GetDealerTurnLogEntries();
+        var entryMap = new Dictionary<string, DealerTurnLogEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var existingEntry in entries)
+        {
+            existingEntry.EnsureInitialized();
+            entryMap[GetDealerTurnLogSelectionKey(existingEntry)] = existingEntry;
+        }
+
+        int remainingBudget = force ? int.MaxValue : 2;
+
+        foreach (string key in pendingDealerTurnLogChatFileWrites.ToList())
+        {
+            if (remainingBudget <= 0)
+                break;
+            if (!entryMap.TryGetValue(key, out var entry))
+            {
+                pendingDealerTurnLogChatFileWrites.Remove(key);
+                continue;
+            }
+
+            WriteDealerTurnLogFile(entry, exportChat: true, updateStatus: false);
+            pendingDealerTurnLogChatFileWrites.Remove(key);
+            remainingBudget--;
+        }
+
+        foreach (string key in pendingDealerTurnLogTradeFileWrites.ToList())
+        {
+            if (remainingBudget <= 0)
+                break;
+            if (!entryMap.TryGetValue(key, out var entry))
+            {
+                pendingDealerTurnLogTradeFileWrites.Remove(key);
+                continue;
+            }
+
+            WriteDealerTurnLogFile(entry, exportChat: false, updateStatus: false);
+            pendingDealerTurnLogTradeFileWrites.Remove(key);
+            remainingBudget--;
+        }
+
+        nextDealerTurnLogFileFlushUtc = (pendingDealerTurnLogChatFileWrites.Count == 0 && pendingDealerTurnLogTradeFileWrites.Count == 0)
+            ? DateTime.MinValue
+            : DateTime.UtcNow.AddMilliseconds(350);
+    }
+
+    private void ExportDealerTurnLogFile(DealerTurnLogEntry entry, bool exportChat)
+    {
+        string configuredDirectory = Plugin.Configuration.HistoryExportDirectory?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(configuredDirectory))
+        {
+            dealerTurnLogExportStatusText = "Insert file directory path first";
+            dealerTurnLogExportStatusPath = string.Empty;
+            dealerTurnLogExportStatusFailed = true;
+            dealerTurnLogExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+            ImGui.OpenPopup("##DealerTurnLogDirectoryRequiredPopup");
+            AddDebugLog("TURNLOG", $"Blocked {(exportChat ? "chat" : "trade")} log export because file directory path is empty.");
+            return;
+        }
+
+        try
+        {
+            WriteDealerTurnLogFile(entry, exportChat, updateStatus: true);
+            Plugin.Configuration.Save();
+            string filePath = exportChat ? entry.ChatExportFilePath : entry.TradeExportFilePath;
+            AddDebugLog("TURNLOG", $"Saved dealer turn {(exportChat ? "chat" : "trade")} log: {filePath}");
+        }
+        catch (Exception ex)
+        {
+            dealerTurnLogExportStatusText = $"Failed to save {(exportChat ? "chat" : "trade")} log";
+            dealerTurnLogExportStatusPath = string.Empty;
+            dealerTurnLogExportStatusFailed = true;
+            dealerTurnLogExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+            AddDebugLog("ERR", $"Dealer turn log export failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private bool DealerTurnLogFileExists(DealerTurnLogEntry entry, bool exportChat)
+    {
+        string filePath = BuildDealerTurnLogFilePath(entry, exportChat);
+        return File.Exists(filePath);
+    }
+
+    private void DeleteDealerTurnLogFile(DealerTurnLogEntry entry, bool exportChat)
+    {
+        try
+        {
+            entry.EnsureInitialized();
+
+            string canonicalPath = BuildDealerTurnLogFilePath(entry, exportChat);
+            string storedPath = exportChat ? entry.ChatExportFilePath : entry.TradeExportFilePath;
+
+            var pathsToDelete = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                canonicalPath,
+                canonicalPath + ".deleted"
+            };
+
+            if (!string.IsNullOrWhiteSpace(storedPath))
+            {
+                pathsToDelete.Add(storedPath);
+                if (!storedPath.EndsWith(".deleted", StringComparison.OrdinalIgnoreCase))
+                    pathsToDelete.Add(storedPath + ".deleted");
+            }
+
+            foreach (string path in pathsToDelete)
+            {
+                if (string.IsNullOrWhiteSpace(path))
+                    continue;
+
+                if (File.Exists(path))
+                    File.Delete(path);
+            }
+
+            EnsureDealerTurnLogDeletedStateLoaded();
+            string deletedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+            dealerTurnLogDeletedState[GetDealerTurnLogDeletedStateKey(entry, exportChat)] = deletedAt;
+            SaveDealerTurnLogDeletedState();
+
+            if (exportChat)
+                entry.ChatExportFilePath = string.Empty;
+            else
+                entry.TradeExportFilePath = string.Empty;
+
+            dealerTurnLogExportStatusText = $"Deleted {(exportChat ? "chat" : "trade")} log";
+            dealerTurnLogExportStatusPath = GetDealerTurnLogExportDirectory();
+            dealerTurnLogExportStatusFailed = false;
+            dealerTurnLogExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+            Plugin.Configuration.Save();
+            AddDebugLog("TURNLOG", $"Deleted dealer turn {(exportChat ? "chat" : "trade")} log(s): {string.Join(" | ", pathsToDelete)}");
+        }
+        catch (Exception ex)
+        {
+            dealerTurnLogExportStatusText = $"Failed to delete {(exportChat ? "chat" : "trade")} log";
+            dealerTurnLogExportStatusPath = string.Empty;
+            dealerTurnLogExportStatusFailed = true;
+            dealerTurnLogExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+            AddDebugLog("ERR", $"Dealer turn log delete failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DrawDealerTurnLogFileCell(DealerTurnLogEntry entry, bool exportChat, Vector4 playerColor)
+    {
+        string deletedTimestamp = GetDealerTurnLogDeletedTimestamp(entry, exportChat);
+        bool wasDeleted = !string.IsNullOrWhiteSpace(deletedTimestamp);
+        string safeName = SanitizeFileName(entry.PlayerName);
+        Vector4 buttonColor = exportChat ? CopyButtonColor : Hex("#DA9E00");
+        string buttonId = $"DealerTurnLogExport{(exportChat ? "Chat" : "Trade")}{safeName}";
+
+        const float actionButtonWidth = 24f;
+        const float buttonSpacing = 10f;
+        float contentWidth = (actionButtonWidth * 2f) + buttonSpacing;
+
+        float verticalOffset = GetDealerTurnLogRowVerticalOffset() - 1.0f;
+        if (verticalOffset > 0f)
+            ImGui.SetCursorPosY(ImGui.GetCursorPosY() + verticalOffset);
+
+        float columnWidth = ImGui.GetColumnWidth();
+        float startX = ImGui.GetCursorPosX() + MathF.Max(0f, (columnWidth - contentWidth) * 0.5f);
+        ImGui.SetCursorPosX(startX);
+
+        if (DrawExportDirectoryIconButton(buttonId, new Vector2(actionButtonWidth, 0f), buttonColor))
+            ExportDealerTurnLogFile(entry, exportChat);
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Save logs");
+
+        ImGui.SameLine(0f, buttonSpacing);
+
+        Vector4 deleteColor = wasDeleted ? WithAlpha(Darken(Hex("#b30000"), 0.15f), 0.45f) : Hex("#b30000");
+        Vector4 deleteTextColor = wasDeleted ? WithAlpha(WhiteText, 0.68f) : WhiteText;
+        string deleteButtonId = $"DealerTurnLogDelete{(exportChat ? "Chat" : "Trade")}{safeName}";
+        bool deletePressed = DrawStyledBoldButton("X", deleteButtonId, new Vector2(actionButtonWidth, 0f), deleteColor, deleteTextColor);
+
+        if (deletePressed && !wasDeleted)
+            DeleteDealerTurnLogFile(entry, exportChat);
+
+        if (ImGui.IsItemHovered())
+        {
+            if (wasDeleted)
+                ImGui.SetTooltip($"Deleted on {deletedTimestamp}");
+            else
+                ImGui.SetTooltip("Delete logs");
+        }
+    }
+
+
+    private void DrawDealerTurnLogHouseCell(DealerTurnLogEntry entry)
+    {
+        entry.EnsureInitialized();
+
+        const float editButtonWidth = 20f;
+        const float buttonSpacing = 6f;
+        const float buttonLeftPadding = 2f;
+        const float textRightPadding = 2f;
+
+        string houseText = (entry.House ?? string.Empty).Trim();
+        float cellStartX = ImGui.GetCursorPosX();
+        float cellStartY = ImGui.GetCursorPosY();
+        float columnWidth = ImGui.GetColumnWidth();
+        float textYOffset = GetDealerTurnLogRowVerticalOffset();
+        float buttonHeight = MathF.Max(18f, ImGui.GetFrameHeight() - 4f);
+        float buttonYOffset = MathF.Max(0f, ((ImGui.GetFrameHeight() - buttonHeight) * 0.5f) + 1f);
+        float buttonX = cellStartX + buttonLeftPadding;
+        float textX = buttonX + editButtonWidth + buttonSpacing;
+        float textAvailableWidth = MathF.Max(0f, (cellStartX + columnWidth) - textX - textRightPadding);
+        string displayText = FitTextToWidth(houseText, textAvailableWidth);
+
+        ImGui.SetCursorPos(new Vector2(buttonX, cellStartY + buttonYOffset));
+        string safeName = SanitizeFileName(entry.PlayerName);
+        if (DrawPencilIconButton($"DealerTurnLogHouseEdit{safeName}", new Vector2(editButtonWidth, buttonHeight), Hex("#c075eb")))
+        {
+            dealerTurnLogEditingHouseEntry = entry;
+            dealerTurnLogHouseEditInput = entry.House ?? string.Empty;
+            openDealerTurnLogHouseEditPopupNextFrame = true;
+        }
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Edit house/club");
+
+        if (!string.IsNullOrWhiteSpace(displayText))
+        {
+            Vector2 screenStart = ImGui.GetWindowPos() - new Vector2(ImGui.GetScrollX(), ImGui.GetScrollY()) + new Vector2(textX, cellStartY + textYOffset);
+            ImGui.GetWindowDrawList().AddText(screenStart, ImGui.ColorConvertFloat4ToU32(NeutralColor), displayText);
+        }
+    }
+
+    private void DrawDealerTurnLogHouseEditPopup()
+    {
+        ImGui.SetNextWindowSize(new Vector2(360f, 0f), ImGuiCond.Appearing);
+        if (!ImGui.BeginPopupModal("##DealerTurnLogHouseEditPopup", ImGuiWindowFlags.AlwaysAutoResize))
+            return;
+
+        ImGui.TextUnformatted("Edit House/Club");
+        ImGui.Spacing();
+        ImGui.SetNextItemWidth(300f);
+        ImGui.InputText("##DealerTurnLogHouseEditInput", ref dealerTurnLogHouseEditInput, 256, ImGuiInputTextFlags.AutoSelectAll | ImGuiInputTextFlags.EnterReturnsTrue);
+
+        if (ImGui.IsItemDeactivatedAfterEdit() && ImGui.IsKeyPressed(ImGuiKey.Enter) && dealerTurnLogEditingHouseEntry != null)
+        {
+            dealerTurnLogEditingHouseEntry.House = (dealerTurnLogHouseEditInput ?? string.Empty).Trim();
+            dealerTurnLogEditingHouseEntry.HouseEditedManually = true;
+            Plugin.Configuration.Save();
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.Spacing();
+        if (DrawStyledBoldButton("Save", "DealerTurnLogHouseEditSave", new Vector2(72f, 0f), CopyButtonColor, WhiteText))
+        {
+            if (dealerTurnLogEditingHouseEntry != null)
+            {
+                dealerTurnLogEditingHouseEntry.House = (dealerTurnLogHouseEditInput ?? string.Empty).Trim();
+                dealerTurnLogEditingHouseEntry.HouseEditedManually = true;
+                Plugin.Configuration.Save();
+            }
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Clear", "DealerTurnLogHouseEditClear", new Vector2(72f, 0f), LossButtonColor, WhiteText))
+        {
+            if (dealerTurnLogEditingHouseEntry != null)
+            {
+                dealerTurnLogEditingHouseEntry.House = string.Empty;
+                dealerTurnLogEditingHouseEntry.HouseEditedManually = true;
+                Plugin.Configuration.Save();
+            }
+            ImGui.CloseCurrentPopup();
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Cancel", "DealerTurnLogHouseEditCancel", new Vector2(72f, 0f), UtilityButtonColor, WhiteText))
+            ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
+    }
+
+    private string FitTextToWidth(string text, float maxWidth)
+    {
+        if (string.IsNullOrEmpty(text) || maxWidth <= 4f)
+            return string.Empty;
+
+        if (ImGui.CalcTextSize(text).X <= maxWidth)
+            return text;
+
+        const string ellipsis = "...";
+        float ellipsisWidth = ImGui.CalcTextSize(ellipsis).X;
+        if (ellipsisWidth >= maxWidth)
+            return string.Empty;
+
+        int low = 0;
+        int high = text.Length;
+        while (low < high)
+        {
+            int mid = (low + high + 1) / 2;
+            string candidate = text[..mid] + ellipsis;
+            if (ImGui.CalcTextSize(candidate).X <= maxWidth)
+                low = mid;
+            else
+                high = mid - 1;
+        }
+
+        return text[..Math.Max(0, low)] + ellipsis;
+    }
+
+    private bool DrawPencilIconButton(string id, Vector2 size, Vector4 baseColor)
+    {
+        Vector2 actualSize = size;
+        if (actualSize.X <= 0f)
+            actualSize.X = 20f;
+        if (actualSize.Y <= 0f)
+            actualSize.Y = MathF.Max(18f, ImGui.GetFrameHeight() - 4f);
+
+        Vector4 hoverColor = Lighten(baseColor, 0.18f);
+        Vector4 activeColor = Lighten(baseColor, 0.08f);
+
+        ImGui.PushStyleColor(ImGuiCol.Button, baseColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hoverColor);
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, activeColor);
+        ImGui.PushStyleColor(ImGuiCol.Text, new Vector4(0f, 0f, 0f, 0f));
+
+        bool pressed = ImGui.Button($"##{id}", actualSize);
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        var drawList = ImGui.GetWindowDrawList();
+        uint iconColor = ImGui.ColorConvertFloat4ToU32(WhiteText);
+
+        float width = max.X - min.X;
+        float height = max.Y - min.Y;
+        float stroke = MathF.Max(1.8f, MathF.Min(width, height) * 0.10f);
+        float rounding = MathF.Max(1.8f, MathF.Min(width, height) * 0.16f);
+
+        Vector2 frameTL = new(min.X + width * 0.16f, min.Y + height * 0.22f);
+        Vector2 frameBL = new(min.X + width * 0.16f, min.Y + height * 0.82f);
+        Vector2 frameBR = new(min.X + width * 0.70f, min.Y + height * 0.82f);
+        Vector2 frameTR = new(min.X + width * 0.70f, min.Y + height * 0.52f);
+        Vector2 frameTopEnd = new(min.X + width * 0.47f, min.Y + height * 0.22f);
+
+        drawList.AddLine(frameTL, frameBL, iconColor, stroke);
+        drawList.AddLine(frameBL, frameBR, iconColor, stroke);
+        drawList.AddLine(frameBR, frameTR, iconColor, stroke);
+        drawList.AddLine(frameTL, frameTopEnd, iconColor, stroke);
+
+        Vector2 axisStart = new(min.X + width * 0.45f, min.Y + height * 0.68f);
+        Vector2 axisEnd = new(min.X + width * 0.78f, min.Y + height * 0.34f);
+        Vector2 axis = axisEnd - axisStart;
+        float axisLength = MathF.Max(0.001f, axis.Length());
+        Vector2 dir = axis / axisLength;
+        Vector2 perp = new Vector2(-dir.Y, dir.X) * (MathF.Min(width, height) * 0.105f);
+
+        Vector2 bodyA = axisStart - perp;
+        Vector2 bodyB = axisEnd - perp;
+        Vector2 bodyC = axisEnd + perp;
+        Vector2 bodyD = axisStart + perp;
+        drawList.AddQuad(bodyA, bodyB, bodyC, bodyD, iconColor, stroke);
+
+        Vector2 tipPoint = axisStart - (dir * (MathF.Min(width, height) * 0.11f));
+        drawList.AddTriangle(bodyA, tipPoint, bodyD, iconColor, stroke);
+
+        Vector2 eraserLeft = axisEnd - perp;
+        Vector2 eraserRight = axisEnd + perp;
+        Vector2 eraserOffset = dir * (MathF.Min(width, height) * 0.11f);
+        drawList.AddLine(eraserLeft, eraserLeft + eraserOffset, iconColor, stroke);
+        drawList.AddLine(eraserRight, eraserRight + eraserOffset, iconColor, stroke);
+        drawList.AddLine(eraserLeft + eraserOffset, eraserRight + eraserOffset, iconColor, stroke);
+
+        ImGui.PopStyleColor(4);
+        return pressed;
+    }
+
+    private void DrawDealerTurnLogDirectoryRequiredPopup()
+    {
+        ImGui.SetNextWindowSize(new Vector2(320f, 0f), ImGuiCond.Appearing);
+        if (!ImGui.BeginPopupModal("##DealerTurnLogDirectoryRequiredPopup", ImGuiWindowFlags.AlwaysAutoResize))
+            return;
+
+        ImGui.TextWrapped("Insert file directory path first");
+        ImGui.Spacing();
+
+        float buttonWidth = 88f;
+        float startX = MathF.Max(0f, (ImGui.GetContentRegionAvail().X - buttonWidth) * 0.5f);
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + startX);
+        if (DrawStyledBoldButton("OK", "DealerTurnLogDirectoryRequiredPopupOk", new Vector2(buttonWidth, 0f), UtilityButtonColor, WhiteText))
+            ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
+    }
+
+    private void RequestOpenDealerTurnLogDirectoryBrowser()
+    {
+        openDealerTurnLogDirectoryBrowserNextFrame = true;
+    }
+
+    private void OpenDealerTurnLogDirectoryBrowser()
+    {
+        string configured = Plugin.Configuration.HistoryExportDirectory?.Trim() ?? string.Empty;
+        string startPath = configured;
+
+        if (string.IsNullOrWhiteSpace(startPath) || !Directory.Exists(startPath))
+            startPath = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+
+        if (string.IsNullOrWhiteSpace(startPath) || !Directory.Exists(startPath))
+            startPath = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+
+        if (string.IsNullOrWhiteSpace(startPath) || !Directory.Exists(startPath))
+            startPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+        if (string.IsNullOrWhiteSpace(startPath) || !Directory.Exists(startPath))
+            startPath = Path.GetPathRoot(Environment.CurrentDirectory) ?? Environment.CurrentDirectory;
+
+        try
+        {
+            startPath = Path.GetFullPath(startPath);
+        }
+        catch
+        {
+        }
+
+        dealerTurnLogDirectoryBrowserCurrentPath = startPath;
+        dealerTurnLogDirectoryBrowserSelectedPath = startPath;
+        dealerTurnLogDirectoryBrowserSearchInput = string.Empty;
+        dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+        ImGui.OpenPopup("##DealerTurnLogDirectoryBrowserPopup");
+    }
+
+    private void DrawDealerTurnLogDirectoryBrowserPopup()
+    {
+        ImGui.SetNextWindowSize(new Vector2(820f, 520f), ImGuiCond.Appearing);
+        if (!ImGui.BeginPopupModal("##DealerTurnLogDirectoryBrowserPopup", ImGuiWindowFlags.NoCollapse | ImGuiWindowFlags.NoResize))
+            return;
+
+        ImGui.TextUnformatted("Choose Files Directory");
+        ImGui.Separator();
+
+        float footerHeight = ImGui.GetFrameHeightWithSpacing() * 3.5f;
+        float sidebarWidth = 180f;
+
+        if (ImGui.BeginChild("##DealerTurnLogDirectorySidebar", new Vector2(sidebarWidth, -footerHeight), true))
+        {
+            ImGui.TextUnformatted("Quick Access");
+            ImGui.Separator();
+
+            DrawDealerTurnLogDirectoryShortcutButton("Desktop", Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
+            DrawDealerTurnLogDirectoryShortcutButton("Documents", Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments));
+            DrawDealerTurnLogDirectoryShortcutButton("Downloads", Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads"));
+            DrawDealerTurnLogDirectoryShortcutButton("User Profile", Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+
+            ImGui.Spacing();
+            ImGui.TextUnformatted("Drives");
+            ImGui.Separator();
+
+            foreach (string drivePath in GetDealerTurnLogBrowserDrivePaths())
+            {
+                string label = drivePath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (string.IsNullOrWhiteSpace(label))
+                    label = drivePath;
+
+                DrawDealerTurnLogDirectoryShortcutButton(label, drivePath);
+            }
+        }
+
+        ImGui.EndChild();
+
+        ImGui.SameLine();
+
+        if (ImGui.BeginChild("##DealerTurnLogDirectoryContent", new Vector2(0f, -footerHeight), true))
+        {
+            DrawDealerTurnLogDirectoryBreadcrumbs(dealerTurnLogDirectoryBrowserCurrentPath);
+
+            ImGui.SetNextItemWidth(-1f);
+            ImGui.InputTextWithHint("##DealerTurnLogDirectorySearch", "Search folders", ref dealerTurnLogDirectoryBrowserSearchInput, 256);
+            ImGui.Separator();
+
+            string currentPath = dealerTurnLogDirectoryBrowserCurrentPath;
+            bool currentExists = !string.IsNullOrWhiteSpace(currentPath) && Directory.Exists(currentPath);
+
+            if (currentExists)
+            {
+                string? parentPath = null;
+                try
+                {
+                    parentPath = Directory.GetParent(currentPath)?.FullName;
+                }
+                catch
+                {
+                }
+
+                if (!string.IsNullOrWhiteSpace(parentPath) && DrawDealerTurnLogDirectoryEntry("..", parentPath, false))
+                {
+                    dealerTurnLogDirectoryBrowserCurrentPath = parentPath;
+                    dealerTurnLogDirectoryBrowserSelectedPath = parentPath;
+                    dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+                }
+
+                IEnumerable<string> subDirectories = Array.Empty<string>();
+                try
+                {
+                    subDirectories = Directory.GetDirectories(currentPath).OrderBy(static dir => Path.GetFileName(dir), StringComparer.OrdinalIgnoreCase);
+                }
+                catch (Exception ex)
+                {
+                    dealerTurnLogDirectoryBrowserErrorText = ex.Message;
+                }
+
+                string search = dealerTurnLogDirectoryBrowserSearchInput?.Trim() ?? string.Empty;
+                if (!string.IsNullOrWhiteSpace(search))
+                {
+                    subDirectories = subDirectories.Where(dir =>
+                    {
+                        string name = Path.GetFileName(dir);
+                        return name.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0;
+                    });
+                }
+
+                foreach (string directory in subDirectories)
+                {
+                    string name = Path.GetFileName(directory);
+                    if (string.IsNullOrWhiteSpace(name))
+                        name = directory;
+
+                    if (DrawDealerTurnLogDirectoryEntry(name, directory, false))
+                    {
+                        dealerTurnLogDirectoryBrowserCurrentPath = directory;
+                        dealerTurnLogDirectoryBrowserSelectedPath = directory;
+                        dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+                    }
+                }
+            }
+            else
+            {
+                ImGui.TextDisabled("Directory not available.");
+            }
+        }
+
+        ImGui.EndChild();
+
+        ImGui.Spacing();
+        ImGui.TextUnformatted("Directory Path:");
+        ImGui.SetNextItemWidth(-1f);
+        if (ImGui.InputText("##DealerTurnLogDirectorySelectedPath", ref dealerTurnLogDirectoryBrowserSelectedPath, 512))
+        {
+            dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+        }
+
+        if (!string.IsNullOrWhiteSpace(dealerTurnLogDirectoryBrowserErrorText))
+        {
+            ImGui.PushStyleColor(ImGuiCol.Text, LossColor);
+            ImGui.TextWrapped(dealerTurnLogDirectoryBrowserErrorText);
+            ImGui.PopStyleColor();
+        }
+
+        float actionButtonWidth = 82f;
+        float buttonSpacing = ImGui.GetStyle().ItemSpacing.X;
+        float totalButtonsWidth = (actionButtonWidth * 2f) + buttonSpacing;
+        float actionStartX = MathF.Max(0f, ImGui.GetContentRegionAvail().X - totalButtonsWidth);
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() + actionStartX);
+
+        if (DrawStyledBoldButton("OK", "DealerTurnLogDirectoryBrowserOk", new Vector2(actionButtonWidth, 0f), Hex("#DA9E00"), WhiteText))
+        {
+            string selectedPath = dealerTurnLogDirectoryBrowserSelectedPath?.Trim() ?? string.Empty;
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(selectedPath))
+                    selectedPath = Path.GetFullPath(selectedPath);
+            }
+            catch
+            {
+            }
+
+            if (string.IsNullOrWhiteSpace(selectedPath))
+            {
+                dealerTurnLogDirectoryBrowserErrorText = "Choose a directory first.";
+            }
+            else if (!Directory.Exists(selectedPath))
+            {
+                dealerTurnLogDirectoryBrowserErrorText = "That directory does not exist.";
+            }
+            else
+            {
+                Plugin.Configuration.HistoryExportDirectory = selectedPath;
+                historyExportDirectoryInput = selectedPath;
+                Plugin.Configuration.Save();
+                dealerTurnLogDirectoryBrowserCurrentPath = selectedPath;
+                dealerTurnLogDirectoryBrowserSelectedPath = selectedPath;
+                dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+                ImGui.CloseCurrentPopup();
+            }
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Cancel", "DealerTurnLogDirectoryBrowserCancel", new Vector2(actionButtonWidth, 0f), DangerButtonColor, WhiteText))
+            ImGui.CloseCurrentPopup();
+
+        ImGui.EndPopup();
+    }
+
+    private void DrawDealerTurnLogDirectoryShortcutButton(string label, string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            return;
+
+        bool selected = string.Equals(dealerTurnLogDirectoryBrowserCurrentPath, path, StringComparison.OrdinalIgnoreCase);
+        if (ImGui.Selectable(label, selected))
+        {
+            dealerTurnLogDirectoryBrowserCurrentPath = path;
+            dealerTurnLogDirectoryBrowserSelectedPath = path;
+            dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+        }
+    }
+
+    private bool DrawDealerTurnLogDirectoryEntry(string label, string uniquePath, bool selected)
+    {
+        bool clicked = ImGui.Selectable($"##DealerTurnLogDirectoryEntry{uniquePath}", selected, ImGuiSelectableFlags.SpanAllColumns);
+
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+        float itemHeight = max.Y - min.Y;
+        float iconHeight = MathF.Min(12f, MathF.Max(9f, itemHeight * 0.52f));
+        float iconWidth = iconHeight * 1.20f;
+        float left = min.X + 7f;
+        float top = min.Y + ((itemHeight - iconHeight) * 0.5f) + 1f;
+        DrawSmallFilledFolderIcon(new Vector2(left, top), iconWidth, iconHeight, new Vector4(0.47f, 0.85f, 1.0f, 1.0f));
+
+        Vector2 textSize = ImGui.CalcTextSize(label);
+        float textX = left + iconWidth + 8f;
+        float textY = min.Y + ((itemHeight - textSize.Y) * 0.5f);
+        var drawList = ImGui.GetWindowDrawList();
+        uint textColor = ImGui.GetColorU32(ImGuiCol.Text);
+        drawList.AddText(new Vector2(textX, textY), textColor, label);
+
+        return clicked;
+    }
+
+    private void DrawSmallFilledFolderIcon(Vector2 topLeft, float width, float height, Vector4 color)
+    {
+        var drawList = ImGui.GetWindowDrawList();
+        uint folderColor = ImGui.ColorConvertFloat4ToU32(color);
+        uint highlightColor = ImGui.ColorConvertFloat4ToU32(new Vector4(1f, 1f, 1f, 0.18f));
+
+        float bodyTop = topLeft.Y + (height * 0.22f);
+        float bodyBottom = topLeft.Y + height;
+        float bodyLeft = topLeft.X;
+        float bodyRight = topLeft.X + width;
+        float tabLeft = bodyLeft + (width * 0.06f);
+        float tabTop = topLeft.Y;
+        float tabRight = bodyLeft + (width * 0.46f);
+        float tabBottom = bodyTop + (height * 0.10f);
+
+        drawList.AddRectFilled(new Vector2(tabLeft, tabTop), new Vector2(tabRight, tabBottom), folderColor, 2f);
+        drawList.AddRectFilled(new Vector2(bodyLeft, bodyTop), new Vector2(bodyRight, bodyBottom), folderColor, 2.2f);
+        drawList.AddRectFilled(new Vector2(bodyLeft + 1.5f, bodyTop + 1.5f), new Vector2(bodyRight - 1.5f, bodyTop + (height * 0.42f)), highlightColor, 1.6f);
+    }
+
+    private IEnumerable<string> GetDealerTurnLogBrowserDrivePaths()
+    {
+        try
+        {
+            return DriveInfo.GetDrives()
+                .Where(drive =>
+                {
+                    try
+                    {
+                        return drive.IsReady || drive.DriveType == DriveType.Fixed || drive.DriveType == DriveType.Removable;
+                    }
+                    catch
+                    {
+                        return false;
+                    }
+                })
+                .Select(drive => drive.RootDirectory.FullName)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch
+        {
+            return Array.Empty<string>();
+        }
+    }
+
+    private void DrawDealerTurnLogDirectoryBreadcrumbs(string currentPath)
+    {
+        if (string.IsNullOrWhiteSpace(currentPath))
+            return;
+
+        IReadOnlyList<(string Label, string Path)> segments = BuildDealerTurnLogDirectoryBreadcrumbs(currentPath);
+        for (int i = 0; i < segments.Count; i++)
+        {
+            var segment = segments[i];
+            if (i > 0)
+            {
+                ImGui.SameLine(0f, 4f);
+                ImGui.TextUnformatted(">");
+                ImGui.SameLine(0f, 4f);
+            }
+
+            if (ImGui.SmallButton($"{segment.Label}##DealerTurnLogDirectoryBreadcrumb{i}"))
+            {
+                dealerTurnLogDirectoryBrowserCurrentPath = segment.Path;
+                dealerTurnLogDirectoryBrowserSelectedPath = segment.Path;
+                dealerTurnLogDirectoryBrowserErrorText = string.Empty;
+            }
+
+            if (i < segments.Count - 1)
+                ImGui.SameLine(0f, 4f);
+        }
+    }
+
+    private IReadOnlyList<(string Label, string Path)> BuildDealerTurnLogDirectoryBreadcrumbs(string currentPath)
+    {
+        var breadcrumbs = new List<(string Label, string Path)>();
+
+        try
+        {
+            string fullPath = Path.GetFullPath(currentPath);
+            string root = Path.GetPathRoot(fullPath) ?? string.Empty;
+            string normalizedRoot = root;
+
+            if (!string.IsNullOrWhiteSpace(normalizedRoot))
+            {
+                string rootLabel = normalizedRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (string.IsNullOrWhiteSpace(rootLabel))
+                    rootLabel = normalizedRoot;
+
+                breadcrumbs.Add((rootLabel, normalizedRoot));
+            }
+
+            string relative = fullPath.Substring(Math.Min(root.Length, fullPath.Length))
+                .Trim(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+            if (!string.IsNullOrWhiteSpace(relative))
+            {
+                string running = string.IsNullOrWhiteSpace(root) ? string.Empty : root;
+                string[] parts = relative.Split(new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (string part in parts)
+                {
+                    running = string.IsNullOrWhiteSpace(running) ? part : Path.Combine(running, part);
+                    breadcrumbs.Add((part, running));
+                }
+            }
+        }
+        catch
+        {
+            if (!string.IsNullOrWhiteSpace(currentPath))
+                breadcrumbs.Add((currentPath, currentPath));
+        }
+
+        return breadcrumbs;
+    }
+
+
+    private void DrawDealerTurnLogHistoryWindow()
+    {
+        if (!showDealerTurnLogHistoryWindow)
+            return;
+
+        ImGui.SetNextWindowSize(new Vector2(980f, 470f), ImGuiCond.FirstUseEver);
+        if (!ImGui.Begin("Dealer Log History###DealerTurnLogHistory", ref showDealerTurnLogHistoryWindow, ImGuiWindowFlags.NoCollapse))
+        {
+            ImGui.End();
+            return;
+        }
+
+        SyncDealerTurnLogHouseForActiveRows();
+
+        DrawDealerTurnLogDirectoryRequiredPopup();
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Files directory path:");
+        ImGui.SameLine();
+
+        const float browseButtonWidth = 30f;
+        const float browseButtonHeight = 24f;
+        const float openFolderButtonWidth = 88f;
+        const float desktopButtonWidth = 64f;
+        const float docsButtonWidth = 48f;
+        const float clearButtonWidth = 50f;
+        float rowSpacing = ImGui.GetStyle().ItemSpacing.X;
+        float buttonsRowWidth = browseButtonWidth + openFolderButtonWidth + desktopButtonWidth + docsButtonWidth + clearButtonWidth + (rowSpacing * 5f);
+
+        if (DrawFolderBrowseIconButton("DealerTurnLogBrowseDirectoryButton", new Vector2(browseButtonWidth, browseButtonHeight), Hex("#9784e8")))
+            RequestOpenDealerTurnLogDirectoryBrowser();
+
+        if (ImGui.IsItemHovered())
+            ImGui.SetTooltip("Browse folders");
+
+        ImGui.SameLine();
+
+        string dealerTurnDirectory = Plugin.Configuration.HistoryExportDirectory ?? string.Empty;
+        float directoryFieldWidth = MathF.Max(180f, ImGui.GetContentRegionAvail().X - buttonsRowWidth);
+        ImGui.SetNextItemWidth(directoryFieldWidth);
+        if (ImGui.InputText("##DealerTurnLogDirectoryPath", ref dealerTurnDirectory, 512))
+        {
+            Plugin.Configuration.HistoryExportDirectory = dealerTurnDirectory;
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Open folder", "DealerTurnLogOpenFolderButton", new Vector2(openFolderButtonWidth, 0f), Hex("#DA9E00"), WhiteText))
+            OpenDirectoryPath(GetDealerTurnLogExportDirectory());
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Desktop", "DealerTurnLogDesktopButton", new Vector2(desktopButtonWidth, 0f), UtilityButtonColor, WhiteText))
+        {
+            Plugin.Configuration.HistoryExportDirectory = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Docs", "DealerTurnLogDocumentsButton", new Vector2(docsButtonWidth, 0f), Hex("#ACC60F"), WhiteText))
+        {
+            Plugin.Configuration.HistoryExportDirectory = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.SameLine();
+        if (DrawStyledBoldButton("Clear", "DealerTurnLogDirectoryClearButton", new Vector2(clearButtonWidth, 0f), Hex("#b30000"), WhiteText))
+        {
+            Plugin.Configuration.HistoryExportDirectory = string.Empty;
+            Plugin.Configuration.Save();
+        }
+
+        ImGui.Separator();
+        DrawDealerTurnLogBulkActionsRow();
+        ImGui.Spacing();
+        ImGui.Separator();
+
+        if (DateTime.UtcNow < dealerTurnLogExportStatusUntilUtc && !string.IsNullOrWhiteSpace(dealerTurnLogExportStatusText))
+        {
+            if (dealerTurnLogExportStatusFailed || string.IsNullOrWhiteSpace(dealerTurnLogExportStatusPath))
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, dealerTurnLogExportStatusFailed ? LossColor : GoldColor);
+                ImGui.TextUnformatted(dealerTurnLogExportStatusText);
+                ImGui.PopStyleColor();
+            }
+            else
+            {
+                ImGui.PushStyleColor(ImGuiCol.Text, GoldColor);
+                ImGui.TextUnformatted($"{dealerTurnLogExportStatusText} ");
+                ImGui.PopStyleColor();
+                ImGui.SameLine(0f, 0f);
+                DrawClickableInlineText(dealerTurnLogExportStatusPath, GoldColor, () => OpenDirectoryPath(dealerTurnLogExportStatusPath), false, "Click to open folder");
+            }
+
+            ImGui.Spacing();
+        }
+
+        ImGui.Text("Sort By:");
+        ImGui.SameLine();
+
+        ImGui.SetNextItemWidth(220f);
+        if (ImGui.BeginCombo("##DealerTurnLogSortBy", dealerTurnLogSortBy))
+        {
+            DrawDealerTurnLogSortOption("Most Recent");
+            DrawDealerTurnLogSortOption("Today");
+            DrawDealerTurnLogSortOption("This Week");
+            DrawDealerTurnLogSortOption("This Month");
+
+            foreach (string houseOption in GetDealerTurnLogHouseSortOptions())
+                DrawDealerTurnLogSortOption(houseOption);
+
+            ImGui.EndCombo();
+        }
+
+        ImGui.SameLine();
+        ImGui.Text("Search:");
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(210f);
+        ImGui.InputText("##DealerTurnLogSearch", ref dealerTurnLogSearchInput, 128);
+
+        ImGui.Spacing();
+
+        var filteredEntries = GetFilteredDealerTurnLogEntries();
+
+        if (filteredEntries.Count == 0)
+        {
+            ImGui.TextDisabled("No dealer turn log entries found.");
+            ImGui.End();
+            return;
+        }
+
+        string colorSeed = $"{dealerTurnLogSortBy}|{dealerTurnLogSearchInput}";
+        var playerColorMap = BuildDealerTurnLogPlayerColorMap(filteredEntries, colorSeed);
+
+        if (!ImGui.BeginTable(
+                "##DealerTurnLogHistoryTable",
+                8,
+                ImGuiTableFlags.Borders | ImGuiTableFlags.RowBg | ImGuiTableFlags.SizingFixedFit,
+                new Vector2(0f, 0f)))
+        {
+            ImGui.End();
+            return;
+        }
+
+        ImGui.TableSetupColumn("House/Club", ImGuiTableColumnFlags.WidthFixed, 135f);
+        ImGui.TableSetupColumn("Player", ImGuiTableColumnFlags.WidthFixed, 170f);
+        ImGui.TableSetupColumn("Joined", ImGuiTableColumnFlags.WidthFixed, 145f);
+        ImGui.TableSetupColumn("Left", ImGuiTableColumnFlags.WidthFixed, 145f);
+        ImGui.TableSetupColumn("Received", ImGuiTableColumnFlags.WidthFixed, 120f);
+        ImGui.TableSetupColumn("Sent", ImGuiTableColumnFlags.WidthFixed, 120f);
+        ImGui.TableSetupColumn("Chat Log", ImGuiTableColumnFlags.WidthFixed, 92f);
+        ImGui.TableSetupColumn("Trade Log", ImGuiTableColumnFlags.WidthFixed, 92f);
+
+        ImGui.TableNextRow(ImGuiTableRowFlags.Headers);
+        ImGui.TableSetColumnIndex(0);
+        DrawCenteredHeaderCell("House/Club");
+        ImGui.TableSetColumnIndex(1);
+        DrawCenteredHeaderCell("Player");
+        ImGui.TableSetColumnIndex(2);
+        DrawCenteredHeaderCell("Joined");
+        ImGui.TableSetColumnIndex(3);
+        DrawCenteredHeaderCell("Left");
+        ImGui.TableSetColumnIndex(4);
+        DrawCenteredHeaderCell("Received");
+        ImGui.TableSetColumnIndex(5);
+        DrawCenteredHeaderCell("Sent");
+        ImGui.TableSetColumnIndex(6);
+        DrawCenteredHeaderCell("Chat Log");
+        ImGui.TableSetColumnIndex(7);
+        DrawCenteredHeaderCell("Trade Log");
+
+        foreach (var entry in filteredEntries)
+        {
+            entry.EnsureInitialized();
+            ApplyDealerTurnLogHouseIfMissing(entry);
+            Vector4 playerColor = playerColorMap.TryGetValue(entry.PlayerName, out var mappedPlayerColor)
+                ? mappedPlayerColor
+                : GetFallbackDealerTurnLogPlayerColor(entry.PlayerName);
+            bool rowSelected = IsDealerTurnLogEntrySelected(entry);
+
+            ImGui.TableNextRow();
+            ImGui.TableSetColumnIndex(0);
+            float rowStartX = ImGui.GetCursorPosX();
+            float rowStartY = ImGui.GetCursorPosY();
+            float rowHeight = MathF.Max(ImGui.GetFrameHeight(), 26f);
+
+            ImGui.PushStyleColor(ImGuiCol.Header, new Vector4(0.28f, 0.44f, 0.72f, 0.24f));
+            ImGui.PushStyleColor(ImGuiCol.HeaderHovered, new Vector4(1f, 1f, 1f, 0.08f));
+            ImGui.PushStyleColor(ImGuiCol.HeaderActive, new Vector4(0.28f, 0.44f, 0.72f, 0.34f));
+            bool rowPressed = ImGui.Selectable($"##DealerTurnLogRow{GetDealerTurnLogSelectionKey(entry)}", rowSelected, ImGuiSelectableFlags.SpanAllColumns, new Vector2(0f, rowHeight));
+            bool rowHovered = ImGui.IsItemHovered();
+            ImGui.SetItemAllowOverlap();
+            ImGui.PopStyleColor(3);
+
+            if (rowPressed)
+            {
+                ToggleDealerTurnLogEntrySelection(entry, ImGui.GetIO().KeyCtrl);
+                rowSelected = IsDealerTurnLogEntrySelected(entry);
+            }
+
+            if (rowSelected)
+                ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(new Vector4(0.28f, 0.44f, 0.72f, 0.22f)));
+            else if (rowHovered)
+                ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, ImGui.GetColorU32(new Vector4(1f, 1f, 1f, 0.05f)));
+
+            ImGui.SetCursorPos(new Vector2(rowStartX, rowStartY));
+            DrawDealerTurnLogHouseCell(entry);
+
+            ImGui.TableSetColumnIndex(1);
+            DrawLeftAlignedVerticallyCenteredColoredCell(entry.PlayerName, playerColor);
+
+            ImGui.TableSetColumnIndex(2);
+            DrawCenteredColoredCell(string.IsNullOrWhiteSpace(entry.JoinedTimestamp) ? "--" : entry.JoinedTimestamp, GoldColor);
+
+            ImGui.TableSetColumnIndex(3);
+            DrawCenteredColoredCell(string.IsNullOrWhiteSpace(entry.LeftTimestamp) ? "--" : entry.LeftTimestamp, string.IsNullOrWhiteSpace(entry.LeftTimestamp) ? ProfitColor : LossColor);
+
+            ImGui.TableSetColumnIndex(4);
+            DrawCenteredColoredCell(string.IsNullOrWhiteSpace(entry.TotalReceivedGil) ? "0" : entry.TotalReceivedGil, ProfitColor);
+
+            ImGui.TableSetColumnIndex(5);
+            DrawCenteredColoredCell(string.IsNullOrWhiteSpace(entry.TotalSentGil) ? "0" : entry.TotalSentGil, LossColor);
+
+            ImGui.TableSetColumnIndex(6);
+            DrawDealerTurnLogFileCell(entry, exportChat: true, playerColor);
+
+            ImGui.TableSetColumnIndex(7);
+            DrawDealerTurnLogFileCell(entry, exportChat: false, playerColor);
+        }
+
+        ImGui.EndTable();
+        ImGui.End();
+    }
+
+    private string GetDealerTurnLogSelectionKey(DealerTurnLogEntry entry)
+    {
+        entry.EnsureInitialized();
+        string player = (entry.PlayerName ?? string.Empty).Trim();
+        string joined = (entry.JoinedTimestamp ?? string.Empty).Trim();
+        return $"{player}|{joined}";
+    }
+
+    private bool IsDealerTurnLogEntrySelected(DealerTurnLogEntry entry)
+    {
+        string key = GetDealerTurnLogSelectionKey(entry);
+        return selectedDealerTurnLogRowKeys.Contains(key) || string.Equals(lastDealerTurnLogSelectedRowKey, key, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void ToggleDealerTurnLogEntrySelection(DealerTurnLogEntry entry, bool additive)
+    {
+        string key = GetDealerTurnLogSelectionKey(entry);
+        lastDealerTurnLogSelectedRowKey = key;
+
+        if (!additive)
+        {
+            selectedDealerTurnLogRowKeys.Clear();
+            selectedDealerTurnLogRowKeys.Add(key);
+            return;
+        }
+
+        if (!selectedDealerTurnLogRowKeys.Add(key))
+        {
+            selectedDealerTurnLogRowKeys.Remove(key);
+            if (selectedDealerTurnLogRowKeys.Count == 0)
+                lastDealerTurnLogSelectedRowKey = key;
+        }
+    }
+
+    private void ClearMissingDealerTurnLogSelections()
+    {
+        var validKeys = GetDealerTurnLogEntries()
+            .Select(GetDealerTurnLogSelectionKey)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        selectedDealerTurnLogRowKeys.RemoveWhere(key => !validKeys.Contains(key));
+        if (!string.IsNullOrWhiteSpace(lastDealerTurnLogSelectedRowKey) && !validKeys.Contains(lastDealerTurnLogSelectedRowKey))
+            lastDealerTurnLogSelectedRowKey = string.Empty;
+    }
+
+    private List<DealerTurnLogEntry> GetSelectedDealerTurnLogEntries()
+    {
+        ClearMissingDealerTurnLogSelections();
+
+        var entries = GetDealerTurnLogEntries();
+        if (selectedDealerTurnLogRowKeys.Count > 0)
+        {
+            var selected = entries
+                .Where(entry => selectedDealerTurnLogRowKeys.Contains(GetDealerTurnLogSelectionKey(entry)))
+                .ToList();
+
+            if (selected.Count > 0)
+                return selected;
+        }
+
+        if (!string.IsNullOrWhiteSpace(lastDealerTurnLogSelectedRowKey))
+        {
+            var fallback = entries
+                .Where(entry => string.Equals(GetDealerTurnLogSelectionKey(entry), lastDealerTurnLogSelectedRowKey, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            if (fallback.Count > 0)
+                return fallback;
+        }
+
+        return new List<DealerTurnLogEntry>();
+    }
+
+    private void SetDealerTurnLogActionStatus(string text, bool failed = false, string? path = null)
+    {
+        dealerTurnLogExportStatusText = text;
+        dealerTurnLogExportStatusFailed = failed;
+        dealerTurnLogExportStatusPath = failed ? string.Empty : (path ?? string.Empty);
+        dealerTurnLogExportStatusUntilUtc = DateTime.UtcNow.AddSeconds(8);
+    }
+
+    private void DrawDealerTurnLogBulkActionsRow()
+    {
+        int selectedCount = GetSelectedDealerTurnLogEntries().Count;
+        bool hasSelectedRows = selectedCount > 0;
+        bool canRenameHouse = hasSelectedRows && !string.IsNullOrWhiteSpace(dealerTurnLogBulkHouseInput);
+        Vector4 bulkDeleteColor = Hex("#b30000");
+        Vector4 clearButtonColor = WithAlpha(bulkDeleteColor, 0.60f);
+        Vector4 disabledGreen = WithAlpha(CopyButtonColor, 0.45f);
+        Vector4 disabledGold = WithAlpha(Hex("#DA9E00"), 0.45f);
+        Vector4 disabledRed = WithAlpha(bulkDeleteColor, 0.45f);
+        Vector4 disabledUtility = WithAlpha(UtilityButtonColor, 0.45f);
+
+        DrawSectionTitle("Bulk Actions");
+        ImGui.Dummy(new Vector2(0f, 2f));
+
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("Rename House/Club:");
+
+        ImGui.SameLine();
+        ImGui.SetNextItemWidth(170f);
+        ImGui.InputTextWithHint("##DealerTurnLogBulkHouseInput", "House/Club for selected", ref dealerTurnLogBulkHouseInput, 256);
+
+        ImGui.SameLine();
+        if (!canRenameHouse)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("✓", "DealerTurnLogBulkSetHouseButton", new Vector2(26f, 0f), canRenameHouse ? UtilityButtonColor : disabledUtility, WhiteText) && canRenameHouse)
+            ApplyBulkHouseToSelectedDealerTurnLogEntries();
+        if (!canRenameHouse)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("|");
+
+        ImGui.SameLine();
+        if (!hasSelectedRows)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("Save Chats", "DealerTurnLogBulkSaveChatsButton", new Vector2(84f, 0f), hasSelectedRows ? CopyButtonColor : disabledGreen, WhiteText) && hasSelectedRows)
+            ExportSelectedDealerTurnLogFiles(exportChat: true);
+        if (!hasSelectedRows)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (!hasSelectedRows)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("Save Trades", "DealerTurnLogBulkSaveTradesButton", new Vector2(88f, 0f), hasSelectedRows ? Hex("#DA9E00") : disabledGold, WhiteText) && hasSelectedRows)
+            ExportSelectedDealerTurnLogFiles(exportChat: false);
+        if (!hasSelectedRows)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.AlignTextToFramePadding();
+        ImGui.TextUnformatted("|");
+
+        ImGui.SameLine();
+        if (!hasSelectedRows)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("Delete Rows", "DealerTurnLogBulkDeleteRowsButton", new Vector2(88f, 0f), hasSelectedRows ? bulkDeleteColor : disabledRed, WhiteText) && hasSelectedRows)
+            DeleteSelectedDealerTurnLogEntries();
+        if (!hasSelectedRows)
+            ImGui.EndDisabled();
+
+        ImGui.Spacing();
+        ImGui.AlignTextToFramePadding();
+        string selectedText = $"Selected: {selectedCount.ToString(CultureInfo.InvariantCulture)}";
+        if (selectedCount > 0)
+            ImGui.TextColored(ProfitColor, selectedText);
+        else
+            ImGui.TextUnformatted(selectedText);
+
+        ImGui.SameLine();
+        if (!hasSelectedRows)
+            ImGui.BeginDisabled();
+        if (DrawStyledBoldButton("Clear", "DealerTurnLogBulkClearSelectionButton", new Vector2(54f, 0f), hasSelectedRows ? clearButtonColor : disabledRed, WhiteText) && hasSelectedRows)
+        {
+            selectedDealerTurnLogRowKeys.Clear();
+            lastDealerTurnLogSelectedRowKey = string.Empty;
+        }
+        if (!hasSelectedRows)
+            ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        ImGui.TextDisabled("Ctrl+Click to multi-select");
+
+        ImGui.Spacing();
+        DrawSectionTitle("Log History");
+    }
+
+    private void ApplyBulkHouseToSelectedDealerTurnLogEntries()
+    {
+        var selectedEntries = GetSelectedDealerTurnLogEntries();
+        if (selectedEntries.Count == 0)
+        {
+            SetDealerTurnLogActionStatus("No rows selected", failed: true);
+            return;
+        }
+
+        string newHouse = (dealerTurnLogBulkHouseInput ?? string.Empty).Trim();
+        foreach (var entry in selectedEntries)
+        {
+            entry.EnsureInitialized();
+            entry.House = newHouse;
+            entry.HouseEditedManually = true;
+        }
+
+        Plugin.Configuration.Save();
+        SetDealerTurnLogActionStatus(string.IsNullOrWhiteSpace(newHouse) ? "Cleared House/Club on selected rows" : "Updated House/Club on selected rows");
+    }
+
+    private void ExportSelectedDealerTurnLogFiles(bool exportChat)
+    {
+        var selectedEntries = GetSelectedDealerTurnLogEntries();
+        if (selectedEntries.Count == 0)
+        {
+            SetDealerTurnLogActionStatus("No rows selected", failed: true);
+            return;
+        }
+
+        string configuredDirectory = Plugin.Configuration.HistoryExportDirectory?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(configuredDirectory))
+        {
+            SetDealerTurnLogActionStatus("Insert file directory path first", failed: true);
+            ImGui.OpenPopup("##DealerTurnLogDirectoryRequiredPopup");
+            return;
+        }
+
+        try
+        {
+            foreach (var entry in selectedEntries)
+                WriteDealerTurnLogFile(entry, exportChat, updateStatus: false);
+
+            Plugin.Configuration.Save();
+            SetDealerTurnLogActionStatus($"Saved {(exportChat ? "chat" : "trade")} logs", failed: false, path: GetDealerTurnLogExportDirectory());
+        }
+        catch (Exception ex)
+        {
+            SetDealerTurnLogActionStatus($"Failed to save {(exportChat ? "chat" : "trade")} logs", failed: true);
+            AddDebugLog("ERR", $"Dealer turn bulk export failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DeleteDealerTurnLogEntryFiles(DealerTurnLogEntry entry)
+    {
+        try
+        {
+            EnsureDealerTurnLogDeletedStateLoaded();
+            foreach (bool exportChat in new[] { true, false })
+            {
+                string filePath = BuildDealerTurnLogFilePath(entry, exportChat);
+                if (File.Exists(filePath))
+                    File.Delete(filePath);
+                dealerTurnLogDeletedState.Remove(GetDealerTurnLogDeletedStateKey(entry, exportChat));
+            }
+            SaveDealerTurnLogDeletedState();
+        }
+        catch (Exception ex)
+        {
+            AddDebugLog("ERR", $"Dealer turn row artifact cleanup failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private void DeleteSelectedDealerTurnLogEntries()
+    {
+        var selectedEntries = GetSelectedDealerTurnLogEntries();
+        if (selectedEntries.Count == 0)
+        {
+            SetDealerTurnLogActionStatus("No rows selected", failed: true);
+            return;
+        }
+
+        var selectedKeys = selectedEntries
+            .Select(GetDealerTurnLogSelectionKey)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in selectedEntries)
+            DeleteDealerTurnLogEntryFiles(entry);
+
+        var entries = GetDealerTurnLogEntries();
+        entries.RemoveAll(entry => selectedKeys.Contains(GetDealerTurnLogSelectionKey(entry)));
+        selectedDealerTurnLogRowKeys.Clear();
+        lastDealerTurnLogSelectedRowKey = string.Empty;
+        Plugin.Configuration.Save();
+        SetDealerTurnLogActionStatus("Deleted selected rows");
+    }
+
+    private void DrawDealerTurnLogSortOption(string option)
+    {
+        bool selected = string.Equals(dealerTurnLogSortBy, option, StringComparison.OrdinalIgnoreCase);
+        if (ImGui.Selectable(option, selected))
+            dealerTurnLogSortBy = option;
+
+        if (selected)
+            ImGui.SetItemDefaultFocus();
+    }
+
+    private List<string> GetDealerTurnLogHouseSortOptions()
+    {
+        var options = GetDealerTurnLogEntries()
+            .Select(entry =>
+            {
+                entry.EnsureInitialized();
+                ApplyDealerTurnLogHouseIfMissing(entry);
+                return GetDealerTurnLogDisplayHouse(entry);
+            })
+            .Where(house => !string.IsNullOrWhiteSpace(house))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(house => house, StringComparer.OrdinalIgnoreCase)
+            .Select(house => $"House: {house}")
+            .ToList();
+
+        if (dealerTurnLogSortBy.StartsWith("House: ", StringComparison.OrdinalIgnoreCase) &&
+            !options.Any(option => string.Equals(option, dealerTurnLogSortBy, StringComparison.OrdinalIgnoreCase)))
+        {
+            options.Insert(0, dealerTurnLogSortBy);
+        }
+
+        return options;
+    }
+
+    private List<DealerTurnLogEntry> GetFilteredDealerTurnLogEntries()
+    {
+        IEnumerable<DealerTurnLogEntry> query = GetDealerTurnLogEntries();
+
+        query = query.Where(entry => entry != null).Select(entry =>
+        {
+            entry.EnsureInitialized();
+            ApplyDealerTurnLogHouseIfMissing(entry);
+            return entry;
+        });
+
+        DateTime now = DateTime.Now;
+        DateTime today = now.Date;
+        DateTime filterStart;
+        DateTime filterEnd;
+
+        if (string.Equals(dealerTurnLogSortBy, "Today", StringComparison.OrdinalIgnoreCase))
+        {
+            filterStart = today;
+            filterEnd = today.AddDays(1);
+            query = query.Where(entry =>
+            {
+                DateTime timestamp = GetDealerTurnLogFilterTimestamp(entry);
+                return timestamp >= filterStart && timestamp < filterEnd;
+            });
+        }
+        else if (string.Equals(dealerTurnLogSortBy, "This Week", StringComparison.OrdinalIgnoreCase))
+        {
+            int diff = ((int)today.DayOfWeek - (int)DayOfWeek.Monday + 7) % 7;
+            filterStart = today.AddDays(-diff);
+            filterEnd = filterStart.AddDays(7);
+            query = query.Where(entry =>
+            {
+                DateTime timestamp = GetDealerTurnLogFilterTimestamp(entry);
+                return timestamp >= filterStart && timestamp < filterEnd;
+            });
+        }
+        else if (string.Equals(dealerTurnLogSortBy, "This Month", StringComparison.OrdinalIgnoreCase))
+        {
+            filterStart = new DateTime(today.Year, today.Month, 1);
+            filterEnd = filterStart.AddMonths(1);
+            query = query.Where(entry =>
+            {
+                DateTime timestamp = GetDealerTurnLogFilterTimestamp(entry);
+                return timestamp >= filterStart && timestamp < filterEnd;
+            });
+        }
+        else if (dealerTurnLogSortBy.StartsWith("House: ", StringComparison.OrdinalIgnoreCase))
+        {
+            string houseFilter = dealerTurnLogSortBy[7..].Trim();
+            query = query.Where(entry => string.Equals(GetDealerTurnLogDisplayHouse(entry), houseFilter, StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (!string.IsNullOrWhiteSpace(dealerTurnLogSearchInput))
+        {
+            string needle = dealerTurnLogSearchInput.Trim();
+            query = query.Where(entry => DealerTurnLogMatchesSearch(entry, needle));
+        }
+
+        return query
+            .OrderByDescending(GetDealerTurnLogRowSortTimestamp)
+            .ThenByDescending(GetDealerTurnLogGroupDateValue)
+            .ThenBy(entry => entry.PlayerName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private DateTime GetDealerTurnLogFilterTimestamp(DealerTurnLogEntry entry)
+    {
+        DateTime timestamp = GetDealerTurnLogRowSortTimestamp(entry);
+        if (timestamp != DateTime.MinValue)
+            return timestamp;
+
+        timestamp = GetDealerTurnLogGroupDateValue(entry);
+        return timestamp != DateTime.MinValue ? timestamp : DateTime.MinValue;
+    }
+
+    private bool DealerTurnLogMatchesSearch(DealerTurnLogEntry entry, string needle)
+    {
+        var parts = new List<string>
+        {
+            GetDealerTurnLogDisplayHouse(entry),
+            entry.PlayerName ?? string.Empty,
+            entry.JoinedTimestamp ?? string.Empty,
+            entry.LeftTimestamp ?? string.Empty,
+            entry.TotalReceivedGil ?? string.Empty,
+            entry.TotalSentGil ?? string.Empty
+        };
+
+        if (entry.ChatLines != null && entry.ChatLines.Count > 0)
+            parts.AddRange(entry.ChatLines);
+        if (entry.TradeLines != null && entry.TradeLines.Count > 0)
+            parts.AddRange(entry.TradeLines);
+
+        string haystack = string.Join(" ", parts.Where(part => !string.IsNullOrWhiteSpace(part)));
+        return haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+    }
+
+    private string GetDealerTurnLogGroupDateLabel(DealerTurnLogEntry entry)
+    {
+        DateTime timestamp = GetDealerTurnLogGroupDateValue(entry);
+        return timestamp == DateTime.MinValue
+            ? "Unknown Date"
+            : timestamp.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    }
+
+    private DateTime GetDealerTurnLogGroupDateValue(DealerTurnLogEntry entry)
+    {
+        DateTime timestamp = ParseTimestamp(entry.JoinedTimestamp);
+        if (timestamp != DateTime.MinValue)
+            return timestamp.Date;
+
+        timestamp = ParseTimestamp(entry.LeftTimestamp);
+        return timestamp == DateTime.MinValue ? DateTime.MinValue : timestamp.Date;
+    }
+
+    private DateTime GetDealerTurnLogRowSortTimestamp(DealerTurnLogEntry entry)
+    {
+        DateTime timestamp = ParseTimestamp(entry.LeftTimestamp);
+        if (timestamp != DateTime.MinValue)
+            return timestamp;
+
+        timestamp = ParseTimestamp(entry.JoinedTimestamp);
+        return timestamp;
+    }
+
+    private Dictionary<string, Vector4> BuildDealerTurnLogPlayerColorMap(IEnumerable<DealerTurnLogEntry> entries, string dateLabel)
+    {
+        var players = entries
+            .Select(entry => entry.PlayerName ?? string.Empty)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        var colorMap = new Dictionary<string, Vector4>(StringComparer.OrdinalIgnoreCase);
+        if (players.Count == 0)
+            return colorMap;
+
+        var random = new Random(unchecked((int)ComputeStableTextHash(dateLabel)));
+        var usedColors = new List<Vector3>();
+
+        foreach (string player in players)
+        {
+            Vector4 color = GenerateDistinctBrightRandomColor(random, usedColors);
+            colorMap[player] = color;
+            usedColors.Add(new Vector3(color.X, color.Y, color.Z));
+        }
+
+        return colorMap;
+    }
+
+    private Vector4 GenerateDistinctBrightRandomColor(Random random, List<Vector3> usedColors)
+    {
+        for (int attempt = 0; attempt < 256; attempt++)
+        {
+            float hue = (float)random.NextDouble();
+            float saturation = 0.55f + ((float)random.NextDouble() * 0.35f);
+            float value = 0.88f + ((float)random.NextDouble() * 0.12f);
+            Vector4 color = HsvToRgba(hue, saturation, value);
+            var rgb = new Vector3(color.X, color.Y, color.Z);
+
+            bool tooDark = ((rgb.X + rgb.Y + rgb.Z) / 3f) < 0.62f;
+            bool tooClose = usedColors.Any(existing => Vector3.Distance(existing, rgb) < 0.22f);
+            if (!tooDark && !tooClose)
+                return color;
+        }
+
+        float fallbackHue = (usedColors.Count * 0.61803398875f) % 1f;
+        return HsvToRgba(fallbackHue, 0.70f, 0.96f);
+    }
+
+    private Vector4 GetFallbackDealerTurnLogPlayerColor(string playerName)
+    {
+        float hue = (ComputeStableTextHash(playerName) % 360u) / 360f;
+        return HsvToRgba(hue, 0.72f, 0.96f);
+    }
+
+    private static Vector4 HsvToRgba(float hue, float saturation, float value)
+    {
+        hue = hue - MathF.Floor(hue);
+        saturation = Math.Clamp(saturation, 0f, 1f);
+        value = Math.Clamp(value, 0f, 1f);
+
+        if (saturation <= 0f)
+            return new Vector4(value, value, value, 1f);
+
+        float scaledHue = hue * 6f;
+        int sector = (int)MathF.Floor(scaledHue);
+        float fraction = scaledHue - sector;
+
+        float p = value * (1f - saturation);
+        float q = value * (1f - (saturation * fraction));
+        float t = value * (1f - (saturation * (1f - fraction)));
+
+        return (sector % 6) switch
+        {
+            0 => new Vector4(value, t, p, 1f),
+            1 => new Vector4(q, value, p, 1f),
+            2 => new Vector4(p, value, t, 1f),
+            3 => new Vector4(p, q, value, 1f),
+            4 => new Vector4(t, p, value, 1f),
+            _ => new Vector4(value, p, q, 1f),
+        };
+    }
+
+    private static uint ComputeStableTextHash(string? text)
+    {
+        const uint offset = 2166136261;
+        const uint prime = 16777619;
+
+        uint hash = offset;
+        string value = text ?? string.Empty;
+        foreach (char c in value)
+        {
+            hash ^= c;
+            hash *= prime;
+        }
+
+        return hash;
+    }
+
+    private static string SanitizeFileName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return "Unknown";
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new StringBuilder(value.Length);
+        foreach (char c in value)
+        {
+            builder.Append(invalid.Contains(c) ? '_' : c);
+        }
+
+        return builder.ToString().Trim();
     }
 
     private bool TryGetTrackedOutcomeCounts(string messageText, string localPlayerName, out int winCount, out int lossCount, out int pushCount)
@@ -3982,6 +7028,7 @@ public class MainWindow : Window, IDisposable
         DrawColoredInlineText(checkpointState, statusColor);
         ImGui.SameLine(0f, 0f);
         ImGui.TextUnformatted($" | Started: {shiftStartText} | Elapsed: {elapsedText}");
+
     }
 
     private void DrawDealerCheckpointButtons()
@@ -4027,6 +7074,16 @@ public class MainWindow : Window, IDisposable
         }
         if (!hasActiveShift)
             ImGui.EndDisabled();
+
+        const float logHistoryButtonWidth = 96f;
+        ImGui.SameLine();
+        float logHistoryButtonX = MathF.Max(
+            ImGui.GetCursorPosX() + 28f,
+            ImGui.GetWindowContentRegionMax().X - logHistoryButtonWidth);
+        ImGui.SetCursorPosX(logHistoryButtonX);
+        if (DrawStyledBoldButton("Log History", "DealerTurnLogHistoryButton", new Vector2(logHistoryButtonWidth, 0f), WithAlpha(Hex("#e552ff"), 0.90f), WhiteText))
+            showDealerTurnLogHistoryWindow = true;
+
     }
 
     private void IncrementDealerTips(BigInteger amount)
@@ -4058,6 +7115,7 @@ public class MainWindow : Window, IDisposable
 
         AddDebugLog("HISTORY", $"Checkpoint entry saved: House: {entry.House} | Time: {entry.Timestamp} | Start Bank: {entry.StartingBank} | Final Bank: {entry.FinalBank} | Tips: {entry.Tips} | Results: {entry.Result}");
         Plugin.Configuration.Save();
+        AppendDealerTurnLogShiftAction(checkpointName);
 
         if (string.Equals(checkpointName, "End Shift", StringComparison.OrdinalIgnoreCase) && Plugin.Configuration.DealerAutoBackupOnEndShift)
         {
@@ -4239,6 +7297,106 @@ public class MainWindow : Window, IDisposable
             onClick();
     }
 
+    private void DrawCompositeInlineText(string leftText, Vector4 leftColor, string rightText, Vector4 rightColor)
+    {
+        ImGui.BeginGroup();
+        ImGui.PushStyleColor(ImGuiCol.Text, leftColor);
+        ImGui.TextUnformatted(leftText);
+        ImGui.PopStyleColor();
+        ImGui.SameLine(0f, 0f);
+        ImGui.PushStyleColor(ImGuiCol.Text, rightColor);
+        ImGui.TextUnformatted(rightText);
+        ImGui.PopStyleColor();
+        ImGui.EndGroup();
+    }
+
+    private void DrawCompositeClickableInlineText(
+        string leftText,
+        Vector4 leftColor,
+        string rightText,
+        Vector4 rightColor,
+        string id,
+        Action onClick,
+        bool underlineOnlyOnHover = false,
+        string tooltip = "Click to open")
+    {
+        Vector2 leftSize = ImGui.CalcTextSize(leftText);
+        Vector2 rightSize = ImGui.CalcTextSize(rightText);
+        float width = leftSize.X + rightSize.X;
+        float height = MathF.Max(leftSize.Y, rightSize.Y);
+        Vector2 start = ImGui.GetCursorScreenPos();
+
+        ImGui.InvisibleButton($"##{id}", new Vector2(MathF.Max(width, 1f), MathF.Max(height, ImGui.GetTextLineHeight())));
+        bool hovered = ImGui.IsItemHovered();
+        Vector2 min = ImGui.GetItemRectMin();
+        Vector2 max = ImGui.GetItemRectMax();
+
+        if (hovered)
+        {
+            Vector4 hoverBlend = new(
+                (leftColor.X + rightColor.X) * 0.5f,
+                (leftColor.Y + rightColor.Y) * 0.5f,
+                (leftColor.Z + rightColor.Z) * 0.5f,
+                0.12f);
+            uint hoverBg = ImGui.ColorConvertFloat4ToU32(hoverBlend);
+            ImGui.GetWindowDrawList().AddRectFilled(
+                new Vector2(min.X - 2f, min.Y - 1f),
+                new Vector2(max.X + 2f, max.Y + 1f),
+                hoverBg,
+                3f);
+
+            ImGui.SetMouseCursor(ImGuiMouseCursor.Hand);
+            if (!string.IsNullOrWhiteSpace(tooltip))
+            {
+                ImGui.BeginTooltip();
+                ImGui.TextUnformatted(tooltip);
+                ImGui.EndTooltip();
+            }
+        }
+
+        Vector4 drawLeftColor = hovered ? Lighten(leftColor, 0.22f) : leftColor;
+        Vector4 drawRightColor = hovered ? Lighten(rightColor, 0.22f) : rightColor;
+        var drawList = ImGui.GetWindowDrawList();
+        drawList.AddText(start, ImGui.ColorConvertFloat4ToU32(drawLeftColor), leftText);
+        drawList.AddText(new Vector2(start.X + leftSize.X, start.Y), ImGui.ColorConvertFloat4ToU32(drawRightColor), rightText);
+
+        if (!underlineOnlyOnHover || hovered)
+        {
+            float thickness = hovered ? 2f : 1f;
+            drawList.AddLine(
+                new Vector2(min.X, max.Y),
+                new Vector2(min.X + leftSize.X, max.Y),
+                ImGui.ColorConvertFloat4ToU32(drawLeftColor),
+                thickness);
+            drawList.AddLine(
+                new Vector2(min.X + leftSize.X, max.Y),
+                new Vector2(min.X + width, max.Y),
+                ImGui.ColorConvertFloat4ToU32(drawRightColor),
+                thickness);
+        }
+
+        if (hovered && ImGui.IsMouseReleased(ImGuiMouseButton.Left))
+            onClick();
+    }
+
+    private void OpenDirectoryPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = path,
+                UseShellExecute = true
+            });
+        }
+        catch
+        {
+        }
+    }
+
     private void OpenExportDirectory()
     {
         if (string.IsNullOrWhiteSpace(dealerExportFilePath))
@@ -4321,6 +7479,43 @@ public class MainWindow : Window, IDisposable
         return currentShiftStart;
     }
 
+
+    private DateTime? TryGetMostRecentDealerShiftStartBefore(DateTime endTimestamp)
+    {
+        if (endTimestamp == DateTime.MinValue)
+            return null;
+
+        var checkpoints = GetCurrentHistory()
+            .Where(IsCheckpointEntry)
+            .Select(entry => new { Entry = entry, Timestamp = ParseTimestamp(entry.Timestamp) })
+            .Where(x => x.Timestamp != DateTime.MinValue && x.Timestamp <= endTimestamp)
+            .OrderBy(x => x.Timestamp)
+            .ToList();
+
+        bool skippedCurrentEnd = false;
+
+        for (int i = checkpoints.Count - 1; i >= 0; i--)
+        {
+            string result = checkpoints[i].Entry.Result ?? string.Empty;
+
+            if (result.Contains("End Shift", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!skippedCurrentEnd && checkpoints[i].Timestamp == endTimestamp)
+                {
+                    skippedCurrentEnd = true;
+                    continue;
+                }
+
+                return null;
+            }
+
+            if (result.Contains("Start Shift", StringComparison.OrdinalIgnoreCase))
+                return checkpoints[i].Timestamp;
+        }
+
+        return null;
+    }
+
     private string GetDealerCheckpointState()
     {
         var latestCheckpoint = GetCurrentHistory()
@@ -4357,6 +7552,20 @@ public class MainWindow : Window, IDisposable
             return $"{(int)elapsed.TotalHours}h {elapsed.Minutes:D2}m";
 
         return $"{elapsed.Minutes:D2}m";
+    }
+
+    private static string FormatShiftDurationDetailed(TimeSpan elapsed)
+    {
+        if (elapsed < TimeSpan.Zero)
+            elapsed = TimeSpan.Zero;
+
+        if (elapsed.TotalHours >= 1)
+            return $"{(int)elapsed.TotalHours}h {elapsed.Minutes:D2}m {elapsed.Seconds:D2}s";
+
+        if (elapsed.TotalMinutes >= 1)
+            return $"{elapsed.Minutes:D2}m {elapsed.Seconds:D2}s";
+
+        return $"{elapsed.Seconds:D2}s";
     }
 
     private List<string> GetDealerHousePresets()
