@@ -193,6 +193,7 @@ The plugin will automaticaly identify: _(You dont need to hit any other buttons)
  - `NAT BJ`/`DIRTY BJ` when you get one
  - `Double Downs` when one happens
 The fields `Current Bank` and `Results` will be also updated accordingly and everything will be automaticaly saved in the `Player History`
+> **Real-time track still in <ins>Experimental</ins> phase, if it fails to detect anything, use the manual buttons to register it.**
 
 <img width="609" height="122" alt="image" src="https://github.com/user-attachments/assets/c9fccc45-30b2-4a91-b23f-6c075f5ea339" />
 
