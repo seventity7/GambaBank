@@ -7,11 +7,12 @@ public static class DebugHub
 {
     private static readonly object Sync = new();
     private static readonly List<string> Entries = new();
+    private static readonly TimeZoneInfo EstTimeZone = ResolveEstTimeZone();
     private const int MaxEntries = 4000;
 
     public static void Add(string category, string message)
     {
-        string line = $"[{DateTime.Now:HH:mm:ss}] [{category}] {message}";
+        string line = $"[{GetEstNow():HH:mm:ss}] [{category}] {message}";
 
         lock (Sync)
         {
@@ -49,5 +50,33 @@ public static class DebugHub
     {
         lock (Sync)
             Entries.Clear();
+    }
+
+    private static TimeZoneInfo ResolveEstTimeZone()
+    {
+        string[] candidateIds =
+        {
+            "Eastern Standard Time",
+            "America/New_York",
+            "US/Eastern"
+        };
+
+        foreach (string id in candidateIds)
+        {
+            try
+            {
+                return TimeZoneInfo.FindSystemTimeZoneById(id);
+            }
+            catch
+            {
+            }
+        }
+
+        return TimeZoneInfo.Local;
+    }
+
+    private static DateTime GetEstNow()
+    {
+        return TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, EstTimeZone);
     }
 }

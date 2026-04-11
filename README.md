@@ -1,4 +1,4 @@
-`Most recent update: 1.0.4`
+`Most recent update: 1.0.5`
 # 
 
 # **💰 Gamba Bank** `Readme Updated Apr 04 - 2026`

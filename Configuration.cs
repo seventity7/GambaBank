@@ -129,6 +129,8 @@ public class ProfileData
     // Dealer turn logs
     public bool DealerTurnLogsEnabled { get; set; } = false;
     public List<DealerTurnLogEntry> DealerTurnLogEntries { get; set; } = new();
+    public List<DealerTurnLogEntry> DealerTableHistoryEntries { get; set; } = new();
+    public List<string> DealerTurnLogPatternSamples { get; set; } = new();
 
     public void EnsureInitialized()
     {
@@ -143,7 +145,11 @@ public class ProfileData
         }
 
         DealerTurnLogEntries ??= new();
+        DealerTableHistoryEntries ??= new();
+        DealerTurnLogPatternSamples ??= new();
         foreach (var entry in DealerTurnLogEntries)
+            entry.EnsureInitialized();
+        foreach (var entry in DealerTableHistoryEntries)
             entry.EnsureInitialized();
     }
 }
@@ -170,10 +176,13 @@ public class DealerTurnLogEntry
     public string LeftTimestamp { get; set; } = string.Empty;
     public string TotalReceivedGil { get; set; } = "0";
     public string TotalSentGil { get; set; } = "0";
+    public string SessionBucketKey { get; set; } = string.Empty;
+    public string LeftReason { get; set; } = string.Empty;
     public string ChatExportFilePath { get; set; } = string.Empty;
     public string TradeExportFilePath { get; set; } = string.Empty;
     public List<string> ChatLines { get; set; } = new();
     public List<string> TradeLines { get; set; } = new();
+    public List<string> MatchHistoryLines { get; set; } = new();
 
     public void EnsureInitialized()
     {
@@ -182,7 +191,10 @@ public class DealerTurnLogEntry
         TradeExportFilePath ??= string.Empty;
         ChatLines ??= new();
         TradeLines ??= new();
+        MatchHistoryLines ??= new();
         TotalReceivedGil ??= "0";
         TotalSentGil ??= "0";
+        SessionBucketKey ??= string.Empty;
+        LeftReason ??= string.Empty;
     }
 }
