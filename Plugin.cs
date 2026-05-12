@@ -3,6 +3,7 @@ using System.Globalization;
 using System.Linq;
 using System.Numerics;
 using Dalamud.Game.Command;
+using Dalamud.Game.Gui.Toast;
 using Dalamud.IoC;
 using Dalamud.Interface.Windowing;
 using Dalamud.Plugin;
@@ -21,6 +22,7 @@ public sealed class Plugin : IDalamudPlugin
     [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
     [PluginService] internal static IPartyList PartyList { get; private set; } = null!;
     [PluginService] internal static IFramework Framework { get; private set; } = null!;
+    [PluginService] internal static IToastGui ToastGui { get; private set; } = null!;
 
     private const string CommandName = "/bank";
     private const string AliasCommandName = "/gamba";
@@ -31,6 +33,7 @@ public sealed class Plugin : IDalamudPlugin
 
     public readonly WindowSystem WindowSystem = new("GambaBank");
     private MainWindow MainWindow { get; init; }
+    private DealerLogReminderToastWindow DealerLogReminderToastWindow { get; init; }
     private ConfigWindow ConfigWindow { get; init; }
     private HelpWindow HelpWindow { get; init; }
     private DebugWindow DebugWindow { get; init; }
@@ -43,11 +46,13 @@ public sealed class Plugin : IDalamudPlugin
         Configuration.Initialize(PluginInterface);
 
         MainWindow = new MainWindow();
+        DealerLogReminderToastWindow = new DealerLogReminderToastWindow(MainWindow.ShouldShowDealerLogReminderToast, MainWindow.GetDealerLogReminderToastText);
         ConfigWindow = new ConfigWindow();
         HelpWindow = new HelpWindow();
         DebugWindow = new DebugWindow(() => MainWindow.BuildDebugSnapshot());
 
         WindowSystem.AddWindow(MainWindow);
+        WindowSystem.AddWindow(DealerLogReminderToastWindow);
         WindowSystem.AddWindow(ConfigWindow);
         WindowSystem.AddWindow(HelpWindow);
         WindowSystem.AddWindow(DebugWindow);
@@ -84,6 +89,7 @@ public sealed class Plugin : IDalamudPlugin
 
         WindowSystem.RemoveAllWindows();
         MainWindow.Dispose();
+        DealerLogReminderToastWindow.Dispose();
         ConfigWindow.Dispose();
         HelpWindow.Dispose();
         DebugWindow.Dispose();
@@ -94,6 +100,24 @@ public sealed class Plugin : IDalamudPlugin
 
         if (ReferenceEquals(Instance, this))
             Instance = null;
+    }
+
+    public static void ShowDealerReminderQuestToast(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+            return;
+
+        try
+        {
+            ToastGui.ShowQuest(message, new QuestToastOptions
+            {
+                PlaySound = false
+            });
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "Failed to show dealer reminder toast.");
+        }
     }
 
     private void OnCommand(string command, string args)

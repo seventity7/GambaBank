@@ -128,6 +128,7 @@ public class ProfileData
 
     // Dealer turn logs
     public bool DealerTurnLogsEnabled { get; set; } = false;
+    public bool DealerLogReminderEnabled { get; set; } = false;
     public List<DealerTurnLogEntry> DealerTurnLogEntries { get; set; } = new();
     public List<DealerTurnLogEntry> DealerTableHistoryEntries { get; set; } = new();
     public List<string> DealerTurnLogPatternSamples { get; set; } = new();

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<Project Sdk="Dalamud.NET.Sdk/14.0.2">
+<Project Sdk="Dalamud.NET.Sdk/15.0.0">
   <PropertyGroup>
-    <Version>1.0.5</Version>
+    <Version>1.0.5.1</Version>
     <PackageProjectUrl>https://github.com/seventity7/GambaBank</PackageProjectUrl>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
     <IsPackable>false</IsPackable>
@@ -16,8 +16,5 @@
   <IconUrl>https://raw.githubusercontent.com/seventity7/GambaBank/main/bank.png</IconUrl>
 </PropertyGroup>
 
-  <ItemGroup>
-    <PackageReference Include="ImGui.NET" Version="1.91.0.1" />
-  </ItemGroup>
 
 </Project>
